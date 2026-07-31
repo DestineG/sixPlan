@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.local
+*.db
+*.db-shm
+*.db-wal
+.sixplan-data/
+
