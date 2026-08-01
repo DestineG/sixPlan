@@ -87,8 +87,9 @@ export async function registerTransferRoutes(app: FastifyInstance): Promise<void
         const file = validateSnapshot(item.content);
         const duplicate = app.database.sqlite.prepare(`SELECT COUNT(*) value FROM plans p JOIN areas a ON a.id = p.area_id
           WHERE a.user_id = ? AND p.name = ? AND p.area_id = ?`).get(request.currentUser!.id, file.plan.name, item.targetAreaId ?? '') as { value: number };
-        const plan = importOne(app, request.currentUser!.id, file, item.targetAreaId, item.createAreaName);
-        results.push({ fileName: item.fileName, success: true, plan, ...(duplicate.value > 0 ? { message: '已导入同名计划副本' } : {}) });
+        const imported = importOne(app, request.currentUser!.id, file, item.targetAreaId, item.createAreaName);
+        results.push({ fileName: item.fileName, success: true, plan: imported.plan, autoActivated: imported.autoActivated,
+          ...(duplicate.value > 0 ? { message: '已导入同名计划副本' } : {}) });
       } catch (error) {
         const known = error instanceof AppError ? error : new AppError(400, 'IMPORT_FAILED', error instanceof Error ? error.message : '导入失败');
         results.push({ fileName: item.fileName, success: false, code: known.code, message: known.message });
@@ -119,7 +120,7 @@ export async function registerTransferRoutes(app: FastifyInstance): Promise<void
         areaName = body.createAreaName;
       }
       const plans = file.plans.map((plan) => insertSnapshot(app, request.currentUser!.id, areaId, plan));
-      return { areaId, areaName, importedPlanCount: plans.length };
+      return { areaId, areaName, importedPlanCount: plans.length, autoActivatedPlanCount: plans.filter((plan) => plan.autoActivated).length };
     })();
     reply.code(201);
     return result;

@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { requireReadyUser } from './auth.js';
 import { AppError } from './errors.js';
 import { wouldCreateCycle } from './graph.js';
+import { assertPlanningStatusAllowed, promotePlanningPlan } from './plan-status.js';
 import {
   ensureEditable, ensureVersion, getArea, getNode, getPlan, mapArea, mapEdge, mapNode, mapPlan,
   type AreaRow, type EdgeRow, type NodeRow, type PlanRow
@@ -94,15 +95,21 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
   });
 
   app.get('/api/plans', async (request) => {
-    const query = z.object({ areaId: z.string().uuid().optional(), status: z.enum(PLAN_STATUSES).optional() }).parse(request.query);
+    const query = z.object({ areaId: z.string().uuid().optional(), status: z.enum(PLAN_STATUSES).optional(),
+      archive: z.enum(['all', 'unarchived', 'archived']).default('unarchived'), q: z.string().trim().max(200).optional(),
+      sort: z.enum(['updated', 'created', 'name']).default('updated') }).parse(request.query);
+    const predicates = ['a.user_id = ?']; const parameters: string[] = [request.currentUser!.id];
+    if (query.archive === 'unarchived') predicates.push('p.archived_at IS NULL');
+    if (query.archive === 'archived') predicates.push('p.archived_at IS NOT NULL');
+    if (query.areaId) { predicates.push('p.area_id = ?'); parameters.push(query.areaId); }
+    if (query.status) { predicates.push('p.status = ?'); parameters.push(query.status); }
+    if (query.q) { predicates.push('(instr(lower(p.name), lower(?)) > 0 OR instr(lower(p.description), lower(?)) > 0)'); parameters.push(query.q, query.q); }
+    const orderBy = query.sort === 'created' ? 'p.created_at DESC, p.id' : query.sort === 'name'
+      ? 'p.name COLLATE NOCASE ASC, p.created_at DESC' : 'p.updated_at DESC, p.id';
     const sql = `SELECT p.*, a.name AS area_name, a.user_id,
       (SELECT COUNT(*) FROM nodes n WHERE n.plan_id = p.id) AS node_count
       FROM plans p JOIN areas a ON a.id = p.area_id
-      WHERE a.user_id = ? AND p.archived_at IS NULL ${query.areaId ? 'AND p.area_id = ?' : ''} ${query.status ? 'AND p.status = ?' : ''}
-      ORDER BY p.updated_at DESC`;
-    const parameters: string[] = [request.currentUser!.id];
-    if (query.areaId) parameters.push(query.areaId);
-    if (query.status) parameters.push(query.status);
+      WHERE ${predicates.join(' AND ')} ORDER BY ${orderBy}`;
     const rows = app.database.sqlite.prepare(sql).all(...parameters) as PlanRow[];
     return { plans: rows.map(mapPlan) };
   });
@@ -113,6 +120,20 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
       FROM plans p JOIN areas a ON a.id = p.area_id WHERE a.user_id = ? AND p.archived_at IS NOT NULL
       ORDER BY a.sort_order, p.archived_at DESC`).all(request.currentUser!.id) as PlanRow[];
     return { plans: rows.map(mapPlan) };
+  });
+
+  app.delete('/api/plans/archived/batch', async (request) => {
+    const body = z.object({ items: z.array(z.object({ id: z.string().uuid(), expectedVersion: z.number().int().positive() })).min(1).max(500) })
+      .refine((value) => new Set(value.items.map((item) => item.id)).size === value.items.length, '计划不能重复选择').parse(request.body);
+    app.database.sqlite.transaction(() => {
+      for (const item of body.items) {
+        const plan = getPlan(app, request.currentUser!.id, item.id); ensureVersion(plan.version, item.expectedVersion);
+        if (!plan.archived_at) throw new AppError(409, 'PLAN_NOT_ARCHIVED', '批量删除只能包含归档计划');
+      }
+      const remove = app.database.sqlite.prepare('DELETE FROM plans WHERE id = ?');
+      for (const item of body.items) remove.run(item.id);
+    })();
+    return { success: true, deletedCount: body.items.length };
   });
 
   app.post('/api/plans', async (request, reply) => {
@@ -141,8 +162,11 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
       status: z.enum(PLAN_STATUSES).optional(), expectedVersion: z.number().int().positive() }).parse(request.body);
     const plan = getPlan(app, request.currentUser!.id, id);
     ensureEditable(plan); ensureVersion(plan.version, body.expectedVersion);
-    app.database.sqlite.prepare(`UPDATE plans SET name = ?, description = ?, status = ?, version = version + 1, updated_at = ? WHERE id = ?`)
-      .run(body.name ?? plan.name, body.description ?? plan.description, body.status ?? plan.status, new Date().toISOString(), id);
+    app.database.sqlite.transaction(() => {
+      if (body.status === 'planning') assertPlanningStatusAllowed(app, id);
+      app.database.sqlite.prepare(`UPDATE plans SET name = ?, description = ?, status = ?, version = version + 1, updated_at = ? WHERE id = ?`)
+        .run(body.name ?? plan.name, body.description ?? plan.description, body.status ?? plan.status, new Date().toISOString(), id);
+    })();
     return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)) };
   });
 
@@ -160,8 +184,12 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const body = z.object({ expectedVersion: z.number().int().positive() }).parse(request.body);
     const plan = getPlan(app, request.currentUser!.id, id); ensureVersion(plan.version, body.expectedVersion);
     if (!plan.archived_at) throw new AppError(409, 'PLAN_NOT_ARCHIVED', '计划尚未归档');
-    app.database.sqlite.prepare('UPDATE plans SET archived_at = NULL, version = version + 1, updated_at = ? WHERE id = ?').run(new Date().toISOString(), id);
-    return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)) };
+    const now = new Date().toISOString();
+    const autoActivated = app.database.sqlite.transaction(() => {
+      app.database.sqlite.prepare('UPDATE plans SET archived_at = NULL, version = version + 1, updated_at = ? WHERE id = ?').run(now, id);
+      return promotePlanningPlan(app, id, now);
+    })();
+    return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)), autoActivated };
   });
 
   app.post('/api/plans/:id/move', async (request) => {
@@ -199,14 +227,16 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const rows = app.database.sqlite.prepare("SELECT * FROM nodes WHERE plan_id = ? AND status IN ('not_started', 'in_progress') ORDER BY created_at")
       .all(planId) as NodeRow[];
     const changed = rows.filter((row) => deriveDateManagedNodeStatus(row.status, row.start_date, today) !== row.status);
-    if (changed.length === 0) return { nodes: [] };
     const now = new Date().toISOString();
     const update = app.database.sqlite.prepare('UPDATE nodes SET status = ?, version = version + 1, updated_at = ? WHERE id = ?');
-    const updated = app.database.sqlite.transaction(() => changed.map((row) => {
-      update.run(deriveDateManagedNodeStatus(row.status, row.start_date, today), now, row.id);
-      return mapNode(getNode(app, request.currentUser!.id, row.id));
-    }))();
-    return { nodes: updated };
+    const result = app.database.sqlite.transaction(() => {
+      const updated = changed.map((row) => {
+        update.run(deriveDateManagedNodeStatus(row.status, row.start_date, today), now, row.id);
+        return mapNode(getNode(app, request.currentUser!.id, row.id));
+      });
+      return { updated, autoActivated: promotePlanningPlan(app, planId, now) };
+    })();
+    return { nodes: result.updated, plan: mapPlan(getPlan(app, request.currentUser!.id, planId)), autoActivated: result.autoActivated };
   });
 
   app.post('/api/plans/:planId/nodes', async (request, reply) => {
@@ -236,10 +266,15 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const startDate = body.startDate === undefined ? node.start_date : body.startDate;
     const endDate = body.endDate === undefined ? node.end_date : body.endDate;
     validateDates(startDate, endDate);
-    app.database.sqlite.prepare(`UPDATE nodes SET title = ?, status = ?, start_date = ?, end_date = ?, summary = ?, extra_content = ?,
-      version = version + 1, updated_at = ? WHERE id = ?`).run(body.title ?? node.title, body.status ?? node.status,
-      startDate, endDate, body.summary ?? node.summary, body.extraContent ?? node.extra_content, new Date().toISOString(), nodeId);
-    return { node: mapNode(getNode(app, request.currentUser!.id, nodeId)) };
+    const now = new Date().toISOString();
+    const autoActivated = app.database.sqlite.transaction(() => {
+      app.database.sqlite.prepare(`UPDATE nodes SET title = ?, status = ?, start_date = ?, end_date = ?, summary = ?, extra_content = ?,
+        version = version + 1, updated_at = ? WHERE id = ?`).run(body.title ?? node.title, body.status ?? node.status,
+        startDate, endDate, body.summary ?? node.summary, body.extraContent ?? node.extra_content, now, nodeId);
+      return promotePlanningPlan(app, node.plan_id, now);
+    })();
+    return { node: mapNode(getNode(app, request.currentUser!.id, nodeId)),
+      plan: mapPlan(getPlan(app, request.currentUser!.id, node.plan_id)), autoActivated };
   });
 
   app.delete('/api/nodes/:nodeId', async (request) => {

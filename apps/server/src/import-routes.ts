@@ -367,20 +367,20 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
       confirmedRevision: z.number().int().positive().optional() }).parse(request.body ?? {});
     const row = getSession(app, request.currentUser!.id, id); const value = await parseFile(row.file_path);
     validateLimits(app, row.user_id, value, statSync(row.file_path).size);
-    let plan;
+    let result;
     if (value.format === 'sixplan-plan-snapshot') {
       let areaId = body.targetAreaId;
       if (body.createAreaName) areaId = createArea(app, row.user_id, body.createAreaName);
       if (!areaId) throw new AppError(400, 'AREA_DECISION_REQUIRED', '请选择或创建目标领域');
       getArea(app, row.user_id, areaId);
-      plan = app.database.sqlite.transaction(() => insertSnapshot(app, row.user_id, areaId!, { plan: value.plan, nodes: value.nodes, edges: value.edges }))();
+      result = app.database.sqlite.transaction(() => insertSnapshot(app, row.user_id, areaId!, { plan: value.plan, nodes: value.nodes, edges: value.edges }))();
       reply.code(201);
     } else {
       if (!row.target_plan_id) throw new AppError(400, 'TARGET_PLAN_REQUIRED', '增量文件需要选择目标计划');
-      plan = applyChangeSet(app, row.user_id, row.target_plan_id, value, body.confirmedRevision);
+      result = applyChangeSet(app, row.user_id, row.target_plan_id, value, body.confirmedRevision);
     }
     deleteSessionFile(row); app.database.sqlite.prepare('DELETE FROM import_sessions WHERE id=?').run(id);
-    return { plan };
+    return result;
   }));
 
   app.delete('/api/import-sessions/:id', async (request) => {

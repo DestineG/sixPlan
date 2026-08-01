@@ -73,6 +73,11 @@ describe('sixPlan API', () => {
     const areas = (await request(cookie, 'GET', '/api/areas')).json<{ areas: AreaDto[] }>().areas;
     expect(areas.find((area) => area.id === work.id)).toMatchObject({ planCount: 2, activePlanCount: 1 });
     expect(areas.find((area) => area.id === life.id)).toMatchObject({ planCount: 0, activePlanCount: 0, archivedPlanCount: 1 });
+
+    const all = (await request(cookie, 'GET', '/api/plans?archive=all&sort=name')).json<{ plans: PlanDto[] }>().plans;
+    expect(all).toHaveLength(3); expect(all.map((plan) => plan.name)).toEqual(['后续规划', '当前项目', '旧项目']);
+    const searched = (await request(cookie, 'GET', '/api/plans?archive=archived&q=旧')).json<{ plans: PlanDto[] }>().plans;
+    expect(searched).toHaveLength(1); expect(searched[0]?.id).toBe(archived.id);
   });
 
   it('reconciles date-managed node statuses without overwriting manual statuses', async () => {
@@ -83,24 +88,69 @@ describe('sixPlan API', () => {
     const past = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '已开始节点', positionX: 200, positionY: 0 })).json<{ node: NodeDto }>().node;
     const noStart = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '未定节点', positionX: 400, positionY: 0 })).json<{ node: NodeDto }>().node;
     const manual = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '人工完成', positionX: 600, positionY: 0 })).json<{ node: NodeDto }>().node;
-    await request(cookie, 'PATCH', `/api/nodes/${future.id}`, { status: 'in_progress', startDate: '2026-08-02', expectedVersion: future.version });
+    await request(cookie, 'PATCH', `/api/nodes/${future.id}`, { startDate: '2026-08-02', expectedVersion: future.version });
     await request(cookie, 'PATCH', `/api/nodes/${past.id}`, { startDate: '2026-07-31', endDate: '2026-07-31', expectedVersion: past.version });
-    await request(cookie, 'PATCH', `/api/nodes/${noStart.id}`, { status: 'in_progress', expectedVersion: noStart.version });
     await request(cookie, 'PATCH', `/api/nodes/${manual.id}`, { status: 'completed', startDate: '2026-07-01', expectedVersion: manual.version });
+    app.database.sqlite.prepare("UPDATE nodes SET status = 'in_progress' WHERE id IN (?, ?)").run(future.id, noStart.id);
 
     const reconciled = await request(cookie, 'POST', `/api/plans/${plan.id}/nodes/reconcile-statuses`, { today: '2026-08-01' });
     expect(reconciled.statusCode).toBe(200);
-    expect(reconciled.json<{ nodes: NodeDto[] }>().nodes).toHaveLength(3);
+    expect(reconciled.json<{ nodes: NodeDto[]; autoActivated: boolean }>().nodes).toHaveLength(3);
+    expect(reconciled.json<{ autoActivated: boolean }>().autoActivated).toBe(true);
     const graph = (await request(cookie, 'GET', `/api/plans/${plan.id}/graph`)).json<{ graph: GraphDto }>().graph;
     expect(graph.nodes.find((node) => node.id === future.id)?.status).toBe('not_started');
     expect(graph.nodes.find((node) => node.id === past.id)?.status).toBe('in_progress');
     expect(graph.nodes.find((node) => node.id === noStart.id)?.status).toBe('not_started');
     expect(graph.nodes.find((node) => node.id === manual.id)?.status).toBe('completed');
-    expect(graph.plan.status).toBe('planning');
+    expect(graph.plan.status).toBe('active');
 
-    await request(cookie, 'POST', `/api/plans/${plan.id}/archive`, { expectedVersion: plan.version });
+    const rejected = await request(cookie, 'PATCH', `/api/plans/${plan.id}`, { status: 'planning', expectedVersion: graph.plan.version });
+    expect(rejected.statusCode).toBe(409); expect(rejected.json()).toMatchObject({ code: 'PLAN_HAS_ACTIVE_NODES' });
+    const paused = (await request(cookie, 'PATCH', `/api/plans/${plan.id}`, { status: 'paused', expectedVersion: graph.plan.version })).json<{ plan: PlanDto }>().plan;
+    expect(paused.status).toBe('paused');
+
+    await request(cookie, 'POST', `/api/plans/${plan.id}/archive`, { expectedVersion: paused.version });
     const archived = await request(cookie, 'POST', `/api/plans/${plan.id}/nodes/reconcile-statuses`, { today: '2026-08-02' });
     expect(archived.statusCode).toBe(409); expect(archived.json()).toMatchObject({ code: 'PLAN_ARCHIVED' });
+  });
+
+  it('auto-activates a planning plan when a node starts and keeps manual plan statuses', async () => {
+    const cookie = await register('node-plan-status');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '执行' })).json<{ area: AreaDto }>().area;
+    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '执行计划' })).json<{ plan: PlanDto }>().plan;
+    const node = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '开始执行', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const started = await request(cookie, 'PATCH', `/api/nodes/${node.id}`, { status: 'in_progress', expectedVersion: node.version });
+    expect(started.statusCode).toBe(200);
+    expect(started.json<{ plan: PlanDto; autoActivated: boolean }>().autoActivated).toBe(true);
+    expect(started.json<{ plan: PlanDto }>().plan.status).toBe('active');
+
+    const activePlan = started.json<{ plan: PlanDto }>().plan;
+    const completed = (await request(cookie, 'PATCH', `/api/plans/${plan.id}`, { status: 'completed', expectedVersion: activePlan.version })).json<{ plan: PlanDto }>().plan;
+    const nodeAfterStart = started.json<{ node: NodeDto }>().node;
+    await request(cookie, 'PATCH', `/api/nodes/${node.id}`, { summary: '继续进行', expectedVersion: nodeAfterStart.version });
+    const unchanged = (await request(cookie, 'GET', `/api/plans/${plan.id}`)).json<{ plan: PlanDto }>().plan;
+    expect(unchanged.status).toBe('completed'); expect(unchanged.version).toBe(completed.version);
+  });
+
+  it('atomically batch-deletes archived plans', async () => {
+    const cookie = await register('batch-delete-user');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '归档区' })).json<{ area: AreaDto }>().area;
+    const first = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '归档一' })).json<{ plan: PlanDto }>().plan;
+    const second = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '归档二' })).json<{ plan: PlanDto }>().plan;
+    const archivedFirst = (await request(cookie, 'POST', `/api/plans/${first.id}/archive`, { expectedVersion: first.version })).json<{ plan: PlanDto }>().plan;
+    const archivedSecond = (await request(cookie, 'POST', `/api/plans/${second.id}/archive`, { expectedVersion: second.version })).json<{ plan: PlanDto }>().plan;
+
+    const stale = await request(cookie, 'DELETE', '/api/plans/archived/batch', { items: [
+      { id: archivedFirst.id, expectedVersion: archivedFirst.version }, { id: archivedSecond.id, expectedVersion: second.version }
+    ] });
+    expect(stale.statusCode).toBe(409); expect(stale.json()).toMatchObject({ code: 'VERSION_CONFLICT' });
+    expect((await request(cookie, 'GET', '/api/plans/archived')).json<{ plans: PlanDto[] }>().plans).toHaveLength(2);
+
+    const removed = await request(cookie, 'DELETE', '/api/plans/archived/batch', { items: [
+      { id: archivedFirst.id, expectedVersion: archivedFirst.version }, { id: archivedSecond.id, expectedVersion: archivedSecond.version }
+    ] });
+    expect(removed.statusCode).toBe(200); expect(removed.json()).toMatchObject({ success: true, deletedCount: 2 });
+    expect((await request(cookie, 'GET', '/api/plans/archived')).json<{ plans: PlanDto[] }>().plans).toHaveLength(0);
   });
 
   it('sets secure cookies only for trusted HTTPS requests and disables storage opening by configuration', async () => {
@@ -154,7 +204,7 @@ describe('sixPlan API', () => {
 
     const snapshot = {
       format: 'sixplan-plan-snapshot', version: 2, areaName: '训练', plan: { name: 'AI 长跑计划' },
-      nodes: [{ key: 'base-training', title: '基础训练' }, { key: 'race-week', title: '比赛周' }],
+      nodes: [{ key: 'base-training', title: '基础训练', status: 'in_progress' }, { key: 'race-week', title: '比赛周' }],
       edges: [{ source: 'base-training', target: 'race-week' }]
     };
     const createdSession = await request(cookie, 'POST', '/api/import-sessions/json', { content: snapshot });
@@ -162,7 +212,8 @@ describe('sixPlan API', () => {
     const preview = createdSession.json<{ preview: { sessionId: string; needsLayout: boolean } }>().preview;
     expect(preview.needsLayout).toBe(true);
     const applied = await request(cookie, 'POST', `/api/import-sessions/${preview.sessionId}/apply`, { targetAreaId: area.id });
-    expect(applied.statusCode).toBe(201); const imported = applied.json<{ plan: PlanDto }>().plan;
+    expect(applied.statusCode).toBe(201); const appliedResult = applied.json<{ plan: PlanDto; autoActivated: boolean }>(); const imported = appliedResult.plan;
+    expect(appliedResult.autoActivated).toBe(true); expect(imported.status).toBe('active');
     const graph = (await request(cookie, 'GET', `/api/plans/${imported.id}/graph`)).json<{ graph: GraphDto }>().graph;
     expect(graph.nodes.map((node) => node.key)).toEqual(['base-training', 'race-week']);
     expect(graph.nodes[1]!.positionX).toBeGreaterThan(graph.nodes[0]!.positionX);
@@ -171,13 +222,13 @@ describe('sixPlan API', () => {
   it('previews and transactionally applies changesets with revision reconfirmation', async () => {
     const cookie = await register('changeset-user');
     const area = (await request(cookie, 'POST', '/api/areas', { name: '长期计划' })).json<{ area: AreaDto }>().area;
-    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '锻炼', status: 'active' })).json<{ plan: PlanDto }>().plan;
+    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '锻炼', status: 'planning' })).json<{ plan: PlanDto }>().plan;
     const first = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '第一阶段', positionX: 100, positionY: 100 })).json<{ node: NodeDto }>().node;
     const second = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '第二阶段', positionX: 400, positionY: 100 })).json<{ node: NodeDto }>().node;
     await request(cookie, 'POST', `/api/plans/${plan.id}/edges`, { sourceNodeId: first.id, targetNodeId: second.id });
     const current = (await request(cookie, 'GET', `/api/plans/${plan.id}`)).json<{ plan: PlanDto }>().plan;
     const changeset = { format: 'sixplan-plan-changeset', version: 2, targetPlanName: '锻炼', baseRevision: current.graphRevision,
-      operations: { addNodes: [{ key: 'recovery-stage', title: '恢复阶段' }], updateNodes: [{ key: first.key, changes: { status: 'completed' } }],
+      operations: { addNodes: [{ key: 'recovery-stage', title: '恢复阶段' }], updateNodes: [{ key: first.key, changes: { status: 'in_progress' } }],
         addEdges: [{ source: second.key, target: 'recovery-stage' }] } };
     const sessionResponse = await request(cookie, 'POST', '/api/import-sessions/json', { content: changeset, targetPlanId: plan.id });
     expect(sessionResponse.statusCode).toBe(200);
@@ -189,9 +240,9 @@ describe('sixPlan API', () => {
     expect(staleApply.statusCode).toBe(409); const staleError = staleApply.json<{ code: string; details: { currentRevision: number } }>();
     expect(staleError.code).toBe('REVISION_RECONFIRM_REQUIRED');
     const applied = await request(cookie, 'POST', `/api/import-sessions/${preview.sessionId}/apply`, { confirmedRevision: staleError.details.currentRevision });
-    expect(applied.statusCode).toBe(200);
+    expect(applied.statusCode).toBe(200); expect(applied.json()).toMatchObject({ autoActivated: true, plan: { status: 'active' } });
     const graph = (await request(cookie, 'GET', `/api/plans/${plan.id}/graph`)).json<{ graph: GraphDto }>().graph;
-    expect(graph.nodes.find((node) => node.key === first.key)?.status).toBe('completed');
+    expect(graph.nodes.find((node) => node.key === first.key)?.status).toBe('in_progress');
     expect(graph.nodes.find((node) => node.key === 'recovery-stage')?.positionX).toBeGreaterThan(second.positionX);
 
     const cycle = { format: 'sixplan-plan-changeset', version: 2, baseRevision: graph.plan.graphRevision,

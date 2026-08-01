@@ -6,6 +6,7 @@ import {
 } from '@sixplan/shared';
 import { AppError } from './errors.js';
 import { isDag } from './graph.js';
+import { normalizeImportedPlanStatus, promotePlanningPlan } from './plan-status.js';
 import { getPlan, mapPlan, type EdgeRow, type NodeRow } from './repository.js';
 
 function validDateOnly(value: string | null): boolean {
@@ -114,13 +115,14 @@ export function createSnapshot(app: FastifyInstance, userId: string, planId: str
 
 export function insertSnapshot(app: FastifyInstance, userId: string, areaId: string, rawPayload: PlanSnapshotPayload) {
   const payload = layoutSnapshot(validateSnapshotPayload(rawPayload));
+  const normalized = normalizeImportedPlanStatus(payload.plan.status, payload.plan.archivedAt, payload.nodes);
   const planId = randomUUID();
   const now = new Date().toISOString();
   const createdAt = payload.plan.createdAt ?? now;
   const updatedAt = payload.plan.updatedAt ?? createdAt;
   app.database.sqlite.prepare(`INSERT INTO plans
     (id,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,1,1,?,?)`).run(planId, areaId, payload.plan.name, payload.plan.description, payload.plan.status,
+    VALUES (?,?,?,?,?,?,1,1,?,?)`).run(planId, areaId, payload.plan.name, payload.plan.description, normalized.status,
       payload.plan.archivedAt, createdAt, updatedAt);
   const idByKey = new Map<string, string>();
   const insertNode = app.database.sqlite.prepare(`INSERT INTO nodes
@@ -139,7 +141,7 @@ export function insertSnapshot(app: FastifyInstance, userId: string, areaId: str
     const edgeCreated = edge.createdAt ?? now;
     insertEdge.run(randomUUID(), planId, idByKey.get(edge.source), idByKey.get(edge.target), edgeCreated, edge.updatedAt ?? edgeCreated);
   }
-  return mapPlan(getPlan(app, userId, planId));
+  return { plan: mapPlan(getPlan(app, userId, planId)), autoActivated: normalized.autoActivated };
 }
 
 interface PreparedChangeSet {
@@ -343,6 +345,7 @@ export function applyChangeSet(app: FastifyInstance, userId: string, planId: str
         .run(metadata?.name ?? plan.name, metadata?.description ?? plan.description, metadata?.status ?? plan.status,
           metadata ? 1 : 0, structural ? 1 : 0, now, planId);
     }
-    return mapPlan(getPlan(app, userId, planId));
+    const autoActivated = promotePlanningPlan(app, planId, now);
+    return { plan: mapPlan(getPlan(app, userId, planId)), autoActivated };
   })();
 }

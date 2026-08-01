@@ -232,6 +232,7 @@ export interface ImportResult {
   plan?: PlanDto;
   code?: string;
   message?: string;
+  autoActivated?: boolean;
 }
 
 export const planStatusLabels: Record<PlanStatus, string> = {

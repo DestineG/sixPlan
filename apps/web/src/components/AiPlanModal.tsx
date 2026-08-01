@@ -164,8 +164,8 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
       const body = preview.kind === 'snapshot'
         ? areaMode === 'existing' ? { targetAreaId } : { createAreaName }
         : { ...(confirmedRevision ? { confirmedRevision } : {}) };
-      const { plan } = await api<{ plan: PlanDto }>(`/api/import-sessions/${preview.sessionId}/apply`, { method: 'POST', body: JSON.stringify(body) });
-      toast.success(preview.kind === 'snapshot' ? '新计划已导入' : '计划增量已应用'); await onApplied(plan); onClose();
+      const { plan, autoActivated } = await api<{ plan: PlanDto; autoActivated: boolean }>(`/api/import-sessions/${preview.sessionId}/apply`, { method: 'POST', body: JSON.stringify(body) });
+      toast.success(`${preview.kind === 'snapshot' ? '新计划已导入' : '计划增量已应用'}${autoActivated ? '，计划已根据节点状态自动设为进行中' : ''}`); await onApplied(plan); onClose();
     } catch (error) {
       if (error instanceof ApiClientError && error.code === 'REVISION_RECONFIRM_REQUIRED' && error.details) {
         const refreshed = error.details as ImportPreviewDto; setPreview({ ...refreshed, sessionId: preview.sessionId });
