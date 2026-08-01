@@ -19,6 +19,57 @@
 
 公网 IP 证书由 Let's Encrypt 免费签发，是有效期约六天的短期证书。Caddy 使用 ACME `shortlived` 配置自动申请和续期，因此公网 `80/443` 必须持续转发到本地 Caddy，且 `sixplan-caddy-data` volume 不应删除。
 
+## 选择应用版本
+
+项目保留两条独立的产品分支：
+
+| 版本 | 分支 | 适用方式 |
+| --- | --- | --- |
+| v0.1 简化版 | `codex/v0.1-simple` | 节点内部使用一层有序子阶段，不包含子计划关联；该分支包含 `v0.1.0` 标签发布后的最新修改 |
+| v0.2 子计划版 | `codex/v0.2-child-plans` | 节点可以关联普通计划作为子计划，适合需要独立 DAG 的阶段 |
+
+这两个版本是并行方案，不是必须逐级升级的前后版本。部署最新分支前，先获取远程更新并切换到需要的分支：
+
+```bash
+git fetch origin --prune --tags
+git switch codex/v0.1-simple
+git pull --ff-only origin codex/v0.1-simple
+```
+
+部署 v0.2 时，将上面两处 `codex/v0.1-simple` 换成 `codex/v0.2-child-plans`。如果需要严格复现发布时的历史快照，可使用 `git switch --detach v0.1.0` 或 `git switch --detach v0.2.0`；标签不会包含对应分支之后的新修改。
+
+### 分别保存两个版本的数据
+
+两个版本不得直接共用同一个生产数据库。Compose 支持通过 `SIXPLAN_DATA_VOLUME` 指定数据卷：
+
+```bash
+# v0.1
+SIXPLAN_DATA_VOLUME=sixplan-v01-data docker compose up -d --build
+
+# v0.2
+SIXPLAN_DATA_VOLUME=sixplan-v02-data docker compose up -d --build
+```
+
+使用 PowerShell 时先设置当前终端的环境变量：
+
+```powershell
+$env:SIXPLAN_DATA_VOLUME="sixplan-v01-data"
+docker compose up -d --build
+```
+
+也可以在 `.env` 中固定填写 `SIXPLAN_DATA_VOLUME=sixplan-v01-data` 或 `SIXPLAN_DATA_VOLUME=sixplan-v02-data`。已有部署如需继续使用原数据，应保持默认的 `sixplan-data`，不要在未迁移数据的情况下改名。
+
+切换版本时先在网页中创建备份，再停止当前版本、切换分支、选择对应数据卷并重新构建：
+
+```bash
+docker compose down
+git switch codex/v0.2-child-plans
+git pull --ff-only origin codex/v0.2-child-plans
+SIXPLAN_DATA_VOLUME=sixplan-v02-data docker compose up -d --build
+```
+
+启用 FRP 时，启动命令同样需要设置对应的 `SIXPLAN_DATA_VOLUME`，并追加 `-f compose.yaml -f compose.frp.yaml`。当前 Compose 配置使用固定的 HTTP/HTTPS 端口、容器网络和 FRP 入口，因此一次只运行一个版本；切换数据卷不会自动迁移数据，也不要把一个版本的全站备份直接恢复到另一个版本。
+
 ## 只启动局域网 HTTP
 
 在项目目录执行：
@@ -27,7 +78,7 @@
 docker compose up -d --build
 ```
 
-访问 `http://本地服务器IP:4173`。应用数据保存在 `sixplan-data` volume 中。
+访问 `http://本地服务器IP:4173`。应用数据保存在 `SIXPLAN_DATA_VOLUME` 指定的 volume 中，未设置时使用 `sixplan-data`。
 
 ## 配置云服务器 frps
 

@@ -83,6 +83,7 @@ npm run admin -- promote username
 | `SIXPLAN_HOST` | `127.0.0.1` | 服务监听地址；需要局域网访问时可设为 `0.0.0.0` |
 | `SIXPLAN_PORT` | `4173` | 服务端口 |
 | `SIXPLAN_DATA_DIR` | 系统应用数据目录下的 `sixplan` | 数据库、备份和导出文件目录 |
+| `SIXPLAN_DATA_VOLUME` | `sixplan-data` | Docker 数据卷名称；部署不同版本时应分别设置 |
 | `SIXPLAN_COOKIE_SECURE` | `auto` | `true`、`false` 或按可信代理协议自动判断的 `auto` |
 | `SIXPLAN_TRUST_PROXY` | 无 | 允许提供代理协议头的固定代理 IP 或 CIDR |
 | `SIXPLAN_ALLOW_OPEN_DATA_DIR` | `true` | Docker 或公网部署时设为 `false` |

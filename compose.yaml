@@ -39,7 +39,7 @@ services:
 
 volumes:
   sixplan-data:
-    name: sixplan-data
+    name: "${SIXPLAN_DATA_VOLUME:-sixplan-data}"
 
 networks:
   sixplan:
