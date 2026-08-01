@@ -24,7 +24,8 @@ const backupPayloadSchema = z.object({
     settings: z.array(z.record(z.unknown())).optional(),
     userSettings: z.array(z.record(z.unknown())).optional(),
     areas: z.array(z.record(z.unknown())), plans: z.array(z.record(z.unknown())),
-    nodes: z.array(z.record(z.unknown())), edges: z.array(z.record(z.unknown()))
+    nodes: z.array(z.record(z.unknown())), steps: z.array(z.record(z.unknown())).optional().default([]),
+    edges: z.array(z.record(z.unknown()))
   })
 });
 
@@ -36,6 +37,7 @@ const tableColumns: Record<string, string[]> = {
   areas: ['id','user_id','name','name_normalized','sort_order','version','created_at','updated_at'],
   plans: ['id','area_id','name','description','status','archived_at','version','graph_revision','created_at','updated_at'],
   nodes: ['id','plan_id','node_key','title','status','start_date','end_date','summary','extra_content','position_x','position_y','version','created_at','updated_at'],
+  node_steps: ['id','node_id','step_key','title','status','start_date','end_date','summary','sort_order','version','created_at','updated_at'],
   user_import_settings: ['user_id','max_nodes','max_edges','max_markdown_bytes','max_file_bytes','session_hours','version','updated_at'],
   edges: ['id','plan_id','source_node_id','target_node_id','version','created_at','updated_at']
 };
@@ -48,13 +50,21 @@ function validateRows(payload: BackupPayload): void {
     if (!Array.isArray(rows)) return;
     for (const row of rows) if (columns.some((column) => !(column in row))) throw new AppError(400, 'INVALID_BACKUP', `备份中的 ${table} 数据不完整`);
   };
-  required('areas', tableColumns.areas!); required('plans', tableColumns.plans!); required('nodes', tableColumns.nodes!); required('edges', tableColumns.edges!);
+  required('areas', tableColumns.areas!); required('plans', tableColumns.plans!); required('nodes', tableColumns.nodes!);
+  required('steps', tableColumns.node_steps!); required('edges', tableColumns.edges!);
   if (payload.scope === 'site') { required('users', tableColumns.users!); required('settings', tableColumns.system_settings!); }
   const areaIds = new Set(payload.data.areas.map((row) => String(row.id)));
   const planIds = new Set(payload.data.plans.map((row) => String(row.id)));
   const nodeIds = new Set(payload.data.nodes.map((row) => String(row.id)));
   if (payload.data.plans.some((row) => !areaIds.has(String(row.area_id)))) throw new AppError(400, 'INVALID_BACKUP', '备份中的计划引用了不存在的领域');
   if (payload.data.nodes.some((row) => !planIds.has(String(row.plan_id)))) throw new AppError(400, 'INVALID_BACKUP', '备份中的节点引用了不存在的计划');
+  if (payload.data.steps.some((row) => !nodeIds.has(String(row.node_id)))) throw new AppError(400, 'INVALID_BACKUP', '备份中的子阶段引用了不存在的节点');
+  const stepKeys = new Set<string>();
+  for (const row of payload.data.steps) {
+    const token = `${String(row.node_id)}:${String(row.step_key)}`;
+    if (stepKeys.has(token)) throw new AppError(400, 'INVALID_BACKUP', '备份中的子阶段 key 重复');
+    stepKeys.add(token);
+  }
   if (payload.data.edges.some((row) => !planIds.has(String(row.plan_id)) || !nodeIds.has(String(row.source_node_id)) || !nodeIds.has(String(row.target_node_id)))) {
     throw new AppError(400, 'INVALID_BACKUP', '备份中的连接引用无效');
   }
@@ -73,6 +83,7 @@ export function collectBackup(app: FastifyInstance, scope: 'user' | 'site', user
   const areas = app.database.sqlite.prepare(`SELECT a.* FROM areas a${filter} ORDER BY a.sort_order`).all(...args) as Record<string, unknown>[];
   const plans = app.database.sqlite.prepare(`SELECT p.* FROM plans p JOIN areas a ON a.id = p.area_id${filter} ORDER BY p.created_at`).all(...args) as Record<string, unknown>[];
   const nodes = app.database.sqlite.prepare(`SELECT n.* FROM nodes n JOIN plans p ON p.id = n.plan_id JOIN areas a ON a.id = p.area_id${filter} ORDER BY n.created_at`).all(...args) as Record<string, unknown>[];
+  const steps = app.database.sqlite.prepare(`SELECT s.* FROM node_steps s JOIN nodes n ON n.id=s.node_id JOIN plans p ON p.id=n.plan_id JOIN areas a ON a.id=p.area_id${filter} ORDER BY s.node_id,s.sort_order`).all(...args) as Record<string, unknown>[];
   const edges = app.database.sqlite.prepare(`SELECT e.* FROM edges e JOIN plans p ON p.id = e.plan_id JOIN areas a ON a.id = p.area_id${filter} ORDER BY e.created_at`).all(...args) as Record<string, unknown>[];
   return {
     format: 'sixplan-backup', version: 1, scope, createdAt: new Date().toISOString(),
@@ -83,7 +94,7 @@ export function collectBackup(app: FastifyInstance, scope: 'user' | 'site', user
         userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings').all() as Record<string, unknown>[]
       } : {}),
       ...(scope === 'user' ? { userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings WHERE user_id = ?').all(userId) as Record<string, unknown>[] } : {}),
-      areas, plans, nodes, edges
+      areas, plans, nodes, steps, edges
     }
   };
 }
@@ -134,8 +145,12 @@ function insertRows(app: FastifyInstance, table: string, rows: Record<string, un
   if (!columns) throw new Error(`Unsupported restore table: ${table}`);
   for (const row of rows) {
     if (columns.some((column) => !(column in row))) throw new AppError(400, 'INVALID_BACKUP', `备份中的 ${table} 数据不完整`);
-    const statement = `INSERT INTO ${table} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`;
-    app.database.sqlite.prepare(statement).run(...columns.map((column) => row[column]));
+    const effectiveColumns = table === 'plans'
+      && (app.database.sqlite.prepare('PRAGMA table_info(plans)').all() as Array<{ name: string }>).some((column) => column.name === 'plan_key')
+      ? [...columns, 'plan_key'] : columns;
+    const statement = `INSERT INTO ${table} (${effectiveColumns.join(',')}) VALUES (${effectiveColumns.map(() => '?').join(',')})`;
+    app.database.sqlite.prepare(statement).run(...effectiveColumns.map((column) => column === 'plan_key'
+      ? row.plan_key ?? `plan-${String(row.id).replaceAll('-', '').slice(0, 12).toLowerCase()}` : row[column]));
   }
 }
 
@@ -150,6 +165,7 @@ export function restoreUserBackup(app: FastifyInstance, userId: string, payload:
     insertRows(app, 'areas', restoredAreas);
     insertRows(app, 'plans', payload.data.plans);
     insertRows(app, 'nodes', payload.data.nodes);
+    insertRows(app, 'node_steps', payload.data.steps);
     insertRows(app, 'edges', payload.data.edges);
     if (payload.data.userSettings?.[0]) insertRows(app, 'user_import_settings', [{ ...payload.data.userSettings[0], user_id: userId }]);
   })();
@@ -162,12 +178,13 @@ export function restoreSiteBackup(app: FastifyInstance, payload: BackupPayload):
   }
   const importFiles = app.database.sqlite.prepare('SELECT file_path FROM import_sessions').all() as Array<{ file_path: string }>;
   app.database.sqlite.transaction(() => {
-    app.database.sqlite.exec('DELETE FROM sessions; DELETE FROM import_sessions; DELETE FROM edges; DELETE FROM nodes; DELETE FROM plans; DELETE FROM areas; DELETE FROM user_import_settings; DELETE FROM system_settings; DELETE FROM users;');
+    app.database.sqlite.exec('DELETE FROM sessions; DELETE FROM import_sessions; DELETE FROM edges; DELETE FROM node_steps; DELETE FROM nodes; DELETE FROM plans; DELETE FROM areas; DELETE FROM user_import_settings; DELETE FROM system_settings; DELETE FROM users;');
     insertRows(app, 'users', payload.data.users!);
     insertRows(app, 'system_settings', payload.data.settings!);
     insertRows(app, 'areas', payload.data.areas);
     insertRows(app, 'plans', payload.data.plans);
     insertRows(app, 'nodes', payload.data.nodes);
+    insertRows(app, 'node_steps', payload.data.steps);
     insertRows(app, 'edges', payload.data.edges);
     if (payload.data.userSettings) insertRows(app, 'user_import_settings', payload.data.userSettings);
   })();

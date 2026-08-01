@@ -16,7 +16,7 @@ import { z } from 'zod';
 import { requireReadyUser } from './auth.js';
 import { AppError } from './errors.js';
 import { applyChangeSet, insertSnapshot, prepareChangeSet, validateSnapshot } from './plan-transfer.js';
-import { getArea, getPlan, type EdgeRow, type NodeRow } from './repository.js';
+import { getArea, getNodeSteps, getPlan, type EdgeRow, type NodeRow } from './repository.js';
 
 interface SessionRow {
   id: string;
@@ -176,14 +176,16 @@ async function parseFile(filePath: string): Promise<PlanSnapshot | PlanChangeSet
   }
   if (format === 'sixplan-plan-changeset') {
     rejectUnknown(keys.top, ['format','version','targetPlanName','baseRevision','planChanges','operations'], '文件顶层');
-    rejectUnknown(keys.operations, ['addNodes','updateNodes','removeNodes','addEdges','removeEdges'], 'operations');
+    rejectUnknown(keys.operations, ['addNodes','updateNodes','removeNodes','addEdges','removeEdges','addSteps','updateSteps','removeSteps','reorderSteps'], 'operations');
     if (!keys.top.has('operations')) throw new AppError(400, 'VALIDATION_ERROR', '增量文件必须包含 operations');
     return PlanChangeSetSchema.parse({
       format, version, targetPlanName: await readValue(filePath, 'targetPlanName'), baseRevision: await readValue(filePath, 'baseRevision'),
       planChanges: await readValue(filePath, 'planChanges'), operations: {
         addNodes: await readArray(filePath, 'operations.addNodes'), updateNodes: await readArray(filePath, 'operations.updateNodes'),
         removeNodes: await readArray(filePath, 'operations.removeNodes'), addEdges: await readArray(filePath, 'operations.addEdges'),
-        removeEdges: await readArray(filePath, 'operations.removeEdges')
+        removeEdges: await readArray(filePath, 'operations.removeEdges'), addSteps: await readArray(filePath, 'operations.addSteps'),
+        updateSteps: await readArray(filePath, 'operations.updateSteps'), removeSteps: await readArray(filePath, 'operations.removeSteps'),
+        reorderSteps: await readArray(filePath, 'operations.reorderSteps')
       }
     });
   }
@@ -198,8 +200,11 @@ function validateLimits(app: FastifyInstance, userId: string, value: PlanSnapsho
   const limits = effectiveLimits(app, userId);
   if (fileBytes > limits.fileBytes) throw new AppError(413, 'IMPORT_FILE_TOO_LARGE', `文件超过 ${limits.fileBytes} 字节限制`);
   const nodes = value.format === 'sixplan-plan-snapshot' ? value.nodes : value.operations.addNodes;
+  const stepCount = value.format === 'sixplan-plan-snapshot'
+    ? value.nodes.reduce((sum, node) => sum + node.steps.length, 0)
+    : value.operations.addNodes.reduce((sum, node) => sum + node.steps.length, 0) + value.operations.addSteps.length;
   const edgeCount = value.format === 'sixplan-plan-snapshot' ? value.edges.length : value.operations.addEdges.length;
-  if (nodes.length > limits.nodes) throw new AppError(413, 'IMPORT_NODE_LIMIT', `节点数量超过 ${limits.nodes} 个限制`);
+  if (nodes.length + stepCount > limits.nodes) throw new AppError(413, 'IMPORT_NODE_LIMIT', `节点及子阶段数量超过 ${limits.nodes} 个限制`);
   if (edgeCount > limits.edges) throw new AppError(413, 'IMPORT_EDGE_LIMIT', `连接数量超过 ${limits.edges} 条限制`);
   for (const node of nodes) if (Buffer.byteLength(node.markdown, 'utf8') > limits.markdownBytes) {
     throw new AppError(413, 'IMPORT_MARKDOWN_LIMIT', `节点 ${node.key} 的 Markdown 超过 ${limits.markdownBytes} 字节限制`);
@@ -211,6 +216,8 @@ function snapshotPreview(snapshot: PlanSnapshot, sessionId: string, expiresAt: s
     sessionId, kind: 'snapshot', planName: snapshot.plan.name, ...(snapshot.areaName ? { suggestedAreaName: snapshot.areaName } : {}),
     nodeCount: snapshot.nodes.length, edgeCount: snapshot.edges.length, addNodeCount: snapshot.nodes.length,
     updateNodeCount: 0, removeNodeCount: 0, addEdgeCount: snapshot.edges.length, removeEdgeCount: 0,
+    addStepCount: snapshot.nodes.reduce((sum, node) => sum + node.steps.length, 0), updateStepCount: 0,
+    removeStepCount: 0, reorderStepCount: 0,
     needsLayout: snapshot.nodes.some((node) => !node.position), expiresAt,
     previewNodes: snapshot.nodes.slice(0, 200).map((node) => ({ key: node.key, title: node.title, status: node.status, change: 'add' })),
     previewEdges: snapshot.edges.slice(0, 300).map((edge) => ({ source: edge.source, target: edge.target, change: 'add' }))
@@ -225,6 +232,12 @@ function validatePromptTargets(app: FastifyInstance, planId: string, changeSet: 
   const operations = changeSet.operations;
   for (const key of [...operations.updateNodes.map((operation) => operation.key), ...operations.removeNodes]) {
     if (!allowedKeys.has(key)) throw new AppError(400, 'PROMPT_SCOPE_VIOLATION', `模型修改了操作范围外的节点：${key}`);
+  }
+  for (const nodeKey of [
+    ...operations.addSteps.map((operation) => operation.nodeKey), ...operations.updateSteps.map((operation) => operation.nodeKey),
+    ...operations.removeSteps.map((operation) => operation.nodeKey), ...operations.reorderSteps.map((operation) => operation.nodeKey)
+  ]) {
+    if (!allowedKeys.has(nodeKey)) throw new AppError(400, 'PROMPT_SCOPE_VIOLATION', `模型修改了操作范围外节点的子阶段：${nodeKey}`);
   }
   const addedKeys = new Set(operations.addNodes.map((node) => node.key));
   for (const edge of [...operations.addEdges, ...operations.removeEdges]) for (const key of [edge.source, edge.target]) {
@@ -255,6 +268,8 @@ function promptContext(app: FastifyInstance, userId: string, planId: string, tar
     totalNodeCount: nodes.length, leafNodeCount: leafKeys.length, markdownIncluded: includeMarkdown, markdownBytes,
     nodes: nodes.filter((node) => included.has(node.node_key)).map((node) => ({ key: node.node_key, title: node.title, status: node.status,
       startDate: node.start_date, endDate: node.end_date, summary: node.summary, position: { x: node.position_x, y: node.position_y },
+      steps: getNodeSteps(app, node.id).map((step) => ({ key: step.step_key, title: step.title, status: step.status,
+        startDate: step.start_date, endDate: step.end_date, summary: step.summary })),
       markdownBytes: Buffer.byteLength(node.extra_content, 'utf8'), ...(includeMarkdown && targets.has(node.node_key) ? { markdown: node.extra_content } : {}) })),
     edges: edges.map((edge) => ({ source: keyById.get(edge.source_node_id)!, target: keyById.get(edge.target_node_id)! }))
       .filter((edge) => included.has(edge.source) && included.has(edge.target)) };

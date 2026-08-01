@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { decodeBackup, encodeBackup, type BackupPayload } from './backup.js';
 
 const payload: BackupPayload = { format: 'sixplan-backup', version: 1, scope: 'user', createdAt: new Date().toISOString(),
-  data: { areas: [], plans: [], nodes: [], edges: [] } };
+  data: { areas: [], plans: [], nodes: [], steps: [], edges: [] } };
 
 describe('backup container', () => {
   it('round-trips an unencrypted backup', async () => expect(await decodeBackup(await encodeBackup(payload))).toEqual(payload));

@@ -70,7 +70,17 @@ const migrations = [
   `CREATE TRIGGER IF NOT EXISTS nodes_node_key_required_insert BEFORE INSERT ON nodes WHEN NEW.node_key IS NULL
     BEGIN SELECT RAISE(ABORT, 'node_key required'); END;
   CREATE TRIGGER IF NOT EXISTS nodes_node_key_required_update BEFORE UPDATE OF node_key ON nodes WHEN NEW.node_key IS NULL
-    BEGIN SELECT RAISE(ABORT, 'node_key required'); END;`
+    BEGIN SELECT RAISE(ABORT, 'node_key required'); END;`,
+  // Version 5 was used by the experimental child-plan branch; keep step storage on version 6.
+  `SELECT 1;`,
+  `CREATE TABLE node_steps (
+    id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    step_key TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'not_started',
+    start_date TEXT, end_date TEXT, summary TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(node_id, step_key)
+  );
+  CREATE INDEX node_steps_node_idx ON node_steps(node_id, sort_order);`
 ];
 
 export interface DatabaseContext {

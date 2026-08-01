@@ -81,6 +81,21 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await expect(page.getByLabel('计划状态', { exact: true })).toHaveValue('active');
   await page.getByRole('button', { name: '设置起止日期为今天' }).click();
   await expect(page.getByText('已保存')).toBeVisible();
+  await page.getByRole('button', { name: '管理子阶段' }).click();
+  const stepModal = page.locator('.dialog-content').filter({ hasText: '管理子阶段' });
+  await stepModal.getByRole('button', { name: '添加子阶段' }).click();
+  await stepModal.getByLabel('名称').fill('完成基础课程');
+  await expect(stepModal.getByText('已保存')).toBeVisible();
+  await stepModal.getByRole('button', { name: '添加子阶段' }).click();
+  await stepModal.getByLabel('名称').fill('完成综合练习');
+  await stepModal.getByLabel('简短说明').fill('整理本阶段错题');
+  await expect(stepModal.getByText('已保存')).toBeVisible();
+  await stepModal.getByTitle('上移').last().click();
+  await expect(stepModal.getByText('已保存')).toBeVisible();
+  await stepModal.screenshot({ path: 'test-results/desktop-node-steps.png' });
+  await stepModal.getByRole('button', { name: '完成', exact: true }).click();
+  await expect(page.locator('.graph-node').first().locator('.graph-node-steps')).toContainText('0/2');
+  await expect(page.getByLabel('开始日期')).toBeDisabled();
   await page.getByRole('button', { name: '编辑附加信息' }).click();
   await page.locator('.cm-content').click();
   await page.keyboard.type('# 学习记录\n\n完成第一轮梳理。');
@@ -91,6 +106,10 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.screenshot({ path: 'test-results/desktop-graph.png', fullPage: true });
 
   await page.getByTitle('返回计划总览').click();
+  const activeCard = page.locator('.plan-card').filter({ hasText: '实习准备' });
+  await expect(activeCard.getByText('当前活跃节点')).toBeVisible();
+  await expect(activeCard.getByText('学习推理基础')).toBeVisible();
+  await expect(activeCard.getByText('完成基础课程')).toBeVisible();
   await page.getByLabel('计划操作').click();
   await page.getByRole('menuitem', { name: '归档' }).click();
   await page.getByRole('button', { name: '确认归档' }).click();
@@ -139,6 +158,9 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await expect(page.locator('.graph-node').first()).toBeVisible();
   await page.locator('.graph-node').first().click();
   await expect(page.getByRole('button', { name: '设置起止日期为今天' })).toHaveCount(0);
+  await page.getByRole('button', { name: '查看子阶段' }).click();
+  await expect(page.getByRole('button', { name: '添加子阶段' })).toHaveCount(0);
+  await page.getByRole('button', { name: '完成', exact: true }).click();
   await page.waitForTimeout(2800);
   await page.screenshot({ path: 'test-results/mobile-graph.png', fullPage: true });
   await page.getByTitle('返回计划总览').click();

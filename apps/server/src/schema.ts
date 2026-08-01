@@ -71,6 +71,21 @@ export const nodes = sqliteTable('nodes', {
   updatedAt: text('updated_at').notNull()
 }, (table) => [uniqueIndex('nodes_plan_key_unique').on(table.planId, table.key)]);
 
+export const nodeSteps = sqliteTable('node_steps', {
+  id: text('id').primaryKey(),
+  nodeId: text('node_id').notNull().references(() => nodes.id, { onDelete: 'cascade' }),
+  key: text('step_key').notNull(),
+  title: text('title').notNull(),
+  status: text('status', { enum: ['not_started', 'in_progress', 'completed', 'paused', 'abandoned'] }).notNull().default('not_started'),
+  startDate: text('start_date'),
+  endDate: text('end_date'),
+  summary: text('summary').notNull().default(''),
+  sortOrder: integer('sort_order').notNull().default(0),
+  version: integer('version').notNull().default(1),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull()
+}, (table) => [uniqueIndex('node_steps_node_key_unique').on(table.nodeId, table.key)]);
+
 export const edges = sqliteTable('edges', {
   id: text('id').primaryKey(),
   planId: text('plan_id').notNull().references(() => plans.id, { onDelete: 'cascade' }),

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Archive, ArrowDown, ArrowUp, Bot, CheckSquare, Download, FileInput, FileUp, FilterX, Folder, FolderInput, FolderPlus, ListChecks, ListPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
+import { Activity, Archive, ArrowDown, ArrowUp, Bot, CheckSquare, ChevronDown, ChevronUp, Download, FileInput, FileUp, FilterX, Folder, FolderInput, FolderPlus, ListChecks, ListPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { PLAN_STATUSES, planStatusLabels, type AreaDto, type ImportPreviewDto, type PlanDto, type PlanStatus } from '@sixplan/shared';
+import { PLAN_STATUSES, nodeStatusLabels, planStatusLabels, type ActivePlanDto, type AreaDto, type ImportPreviewDto, type PlanDto, type PlanStatus } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile } from '../api';
 import { ConfirmDialog, Modal } from '../components/Dialogs';
 import { AiPlanModal } from '../components/AiPlanModal';
@@ -12,6 +12,7 @@ import { AiPlanModal } from '../components/AiPlanModal';
 type Selection = 'active' | 'all' | 'archived' | string;
 type ArchiveFilter = 'all' | 'unarchived' | 'archived';
 type PlanSort = 'updated' | 'created' | 'name';
+type PlanWithActivity = PlanDto & Partial<Pick<ActivePlanDto, 'activeNodes'>>;
 
 export function OverviewPage() {
   const queryClient = useQueryClient(); const navigate = useNavigate(); const [searchParams, setSearchParams] = useSearchParams();
@@ -40,7 +41,7 @@ export function OverviewPage() {
       if (queryText) query.set('q', queryText); if (filterArea) query.set('areaId', filterArea); if (filterStatus) query.set('status', filterStatus);
       return api<{ plans: PlanDto[] }>(`/api/plans?${query}`);
     }
-    return api<{ plans: PlanDto[] }>(`/api/plans${selection === 'active' ? '?status=active' : `?areaId=${selection}`}`);
+    return selection === 'active' ? api<{ plans: PlanWithActivity[] }>('/api/plans/active') : api<{ plans: PlanWithActivity[] }>(`/api/plans?areaId=${selection}`);
   } });
   const areas = useMemo(() => areasQuery.data?.areas ?? [], [areasQuery.data]);
   const plans = useMemo(() => plansQuery.data?.plans ?? [], [plansQuery.data]);
@@ -108,8 +109,9 @@ export function OverviewPage() {
   }
   function renderPlanCard(plan: PlanDto, archivedView = false) {
     const archived = Boolean(plan.archivedAt); const selecting = archivedView && batchMode;
-    return <PlanCard key={plan.id} plan={plan} selectionMode={selecting} selected={selectedArchivedIds.has(plan.id)}
+    return <PlanCard key={plan.id} plan={plan} showActivity={selection === 'active'} selectionMode={selecting} selected={selectedArchivedIds.has(plan.id)}
       onToggle={() => toggleArchived(plan.id)} onOpen={() => selecting ? toggleArchived(plan.id) : navigate(`/plans/${plan.id}`)}
+      onOpenNode={(nodeId) => navigate(`/plans/${plan.id}?node=${encodeURIComponent(nodeId)}`)}
       onEdit={!archived ? () => setPlanModal({ open: true, plan }) : undefined} onMove={!archived ? () => setMovePlan(plan) : undefined}
       onExport={() => downloadFile(`/api/plans/${plan.id}/export`).catch(showError)}
       onArchive={!archived ? () => setConfirm({ plan, kind: 'archive' }) : undefined}
@@ -160,7 +162,7 @@ export function OverviewPage() {
       : plansQuery.isLoading ? <div className="page-loader"><span className="spinner" />加载计划</div>
       : plans.length === 0 ? <EmptyState icon={selection === 'active' ? <Activity size={28} /> : selection === 'archived' ? <Archive size={28} /> : <Plus size={28} />} title={selection === 'active' ? '当前没有活跃计划' : selection === 'archived' ? '还没有归档计划' : selection === 'all' && (queryText || filterArea || filterStatus || archiveFilter !== 'all' || planSort !== 'updated') ? '没有匹配的计划' : '这个视图还没有计划'} body={selection === 'active' ? '将计划状态设为“进行中”后会显示在这里。' : selection === 'archived' ? '归档后的计划会集中显示在这里。' : selection === 'all' && (queryText || filterArea || filterStatus || archiveFilter !== 'all' || planSort !== 'updated') ? '调整搜索词或筛选条件后重试。' : '创建计划后即可开始搭建 DAG。'} action={selection === 'active' || selection === 'archived' ? undefined : () => setPlanModal({ open: true })} actionLabel="新建计划" />
       : selection === 'archived' ? <div className="archive-groups">{grouped.map(({ area, plans: areaPlans }) => { const ids = areaPlans.map((plan) => plan.id); const selectedCount = ids.filter((id) => selectedArchivedIds.has(id)).length; return <section className="archive-group" key={area.id}><h2>{batchMode && <GroupSelectionCheckbox label={`选择${area.name}领域`} checked={selectedCount === ids.length} indeterminate={selectedCount > 0 && selectedCount < ids.length} onChange={(checked) => selectArchived(ids, checked)} />}<span className="archive-group-name">{area.name}</span><span>{areaPlans.length}</span>{batchMode && <button className="secondary-button compact" onClick={() => selectArchived(ids, selectedCount !== ids.length)}>{selectedCount === ids.length ? '取消本领域' : '选择本领域'}</button>}</h2><div className="plan-grid">{areaPlans.map((plan) => renderPlanCard(plan, true))}</div></section>; })}</div>
-      : <div className="plan-grid">{plans.map((plan) => renderPlanCard(plan))}</div>}
+      : <div className={`plan-grid ${selection === 'active' ? 'active-plan-grid' : ''}`}>{plans.map((plan) => renderPlanCard(plan))}</div>}
     </section>
     <AreaEditor state={areaModal} onClose={() => setAreaModal({ open: false })} onSaved={refresh} />
     <PlanEditor state={planModal} areas={areas} preferredAreaId={selection !== 'active' && selection !== 'all' && selection !== 'archived' ? selection : undefined} preferredStatus={selection === 'active' ? 'active' : undefined} onClose={() => setPlanModal({ open: false })} onSaved={refresh} />
@@ -191,10 +193,12 @@ function GroupSelectionCheckbox({ label, checked, indeterminate, onChange }: { l
   return <input ref={input} className="group-selection-check" type="checkbox" aria-label={label} checked={checked} onChange={(event) => onChange(event.target.checked)} />;
 }
 
-function PlanCard({ plan, selectionMode = false, selected = false, onToggle, onOpen, onEdit, onMove, onExport, onArchive, onRestore, onDelete }: {
-  plan: PlanDto; selectionMode?: boolean; selected?: boolean; onToggle?: () => void; onOpen: () => void; onEdit?: () => void;
+function PlanCard({ plan, showActivity = false, selectionMode = false, selected = false, onToggle, onOpen, onOpenNode, onEdit, onMove, onExport, onArchive, onRestore, onDelete }: {
+  plan: PlanWithActivity; showActivity?: boolean; selectionMode?: boolean; selected?: boolean; onToggle?: () => void; onOpen: () => void; onOpenNode: (nodeId: string) => void; onEdit?: () => void;
   onMove?: () => void; onExport: () => void; onArchive?: () => void; onRestore?: () => void; onDelete?: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false); const activeNodes = plan.activeNodes ?? [];
+  const visibleNodes = expanded ? activeNodes : activeNodes.slice(0, 3);
   return <article className={`plan-card ${plan.archivedAt ? 'archived' : ''} ${selected ? 'batch-selected' : ''}`} onDoubleClick={selectionMode ? undefined : onOpen}>
     <div className="plan-card-top"><div className="plan-card-badges"><span className={`status-pill status-${plan.status}`}>{planStatusLabels[plan.status]}</span>{plan.archivedAt && <span className="archived-card-badge">已归档</span>}</div>
     {selectionMode ? <input className="batch-card-check" type="checkbox" aria-label={`选择计划 ${plan.name}`} checked={selected} onChange={onToggle} /> : <DropdownMenu.Root><DropdownMenu.Trigger className="icon-button" aria-label="计划操作"><MoreHorizontal size={18} /></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="end">
@@ -203,6 +207,13 @@ function PlanCard({ plan, selectionMode = false, selected = false, onToggle, onO
       {onRestore && <DropdownMenu.Item onSelect={onRestore}><RotateCcw size={15} />恢复</DropdownMenu.Item>}{onDelete && <DropdownMenu.Item className="menu-danger" onSelect={onDelete}><Trash2 size={15} />永久删除</DropdownMenu.Item>}
     </DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root>}</div>
     <button className="plan-card-body" onClick={onOpen}><h2>{plan.name}</h2><p>{plan.description || '暂无说明'}</p></button>
+    {showActivity && <div className="plan-activity"><div className="plan-activity-heading"><strong>当前活跃节点</strong><span>{activeNodes.length}</span></div>
+      {activeNodes.length === 0 ? <p className="plan-activity-empty">暂无进行中的节点</p> : <div className="active-node-list">{visibleNodes.map((node) => <button key={node.id} className="active-node-row" onClick={() => onOpenNode(node.id)}>
+        <div><strong>{node.title}</strong>{node.stepCount > 0 && <span>{node.completedStepCount}/{node.stepCount}</span>}</div>
+        {node.activeSteps.length > 0 ? node.activeSteps.slice(0, 2).map((step) => <small key={step.id}><span className={`node-status node-status-${step.status}`}>{nodeStatusLabels[step.status]}</span>{step.title}{step.startDate || step.endDate ? ` · ${step.startDate ?? '未定'} 至 ${step.endDate ?? '未定'}` : ''}</small>) : <small>{node.summary || '节点正在进行中'}</small>}
+      </button>)}</div>}
+      {activeNodes.length > 3 && <button className="activity-expand" onClick={() => setExpanded((value) => !value)}>{expanded ? <><ChevronUp size={14} />收起</> : <><ChevronDown size={14} />还有 {activeNodes.length - 3} 个</>}</button>}
+    </div>}
     <div className="plan-card-meta"><span>{plan.areaName}</span><span>{plan.nodeCount} 个节点</span><time>{new Date(plan.archivedAt ?? plan.updatedAt).toLocaleDateString('zh-CN')}</time></div></article>;
 }
 

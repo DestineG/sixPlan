@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt } from './ai-prompts';
 
 describe('AI prompt construction', () => {
+  it('documents ordered steps without forcing them into every node', () => {
+    const prompt = buildSnapshotPrompt('制定一个长期学习计划');
+    expect(prompt).toContain('"steps"');
+    expect(prompt).toContain('只有用户想法确实包含某阶段内部的顺序拆解时才使用 steps');
+    expect(prompt).toContain('并行、分支、依赖或多层结构应建成普通节点和边');
+  });
+
   it('builds a deterministic v2 snapshot prompt without internal ids', () => {
     const prompt = buildSnapshotPrompt('准备一次长跑', '锻炼');
     expect(prompt).toContain('sixplan-plan-snapshot');
@@ -32,9 +39,23 @@ describe('AI prompt construction', () => {
     expect(prompt).toContain('operations.updateNodes');
     expect(prompt).toContain('operations.removeNodes');
     expect(prompt).toContain('operations.addEdges 和 removeEdges');
+    expect(prompt).toContain('operations.addSteps');
+    expect(prompt).toContain('operations.updateSteps');
+    expect(prompt).toContain('operations.removeSteps');
+    expect(prompt).toContain('operations.reorderSteps');
     expect(prompt).toContain('planChanges 可修改');
     expect(prompt).toContain('不得因为用户提到某个字段，就忽略其同时提出的其他操作');
     expect(prompt).not.toContain('changes 只允许包含');
+  });
+
+  it('includes existing ordered steps in incremental context', () => {
+    const prompt = buildChangeSetPrompt('调整子阶段顺序', { plan: { name: '学习', description: '', status: 'active', graphRevision: 3 },
+      scope: 'all', targetKeys: ['stage'], leafKeys: ['stage'], totalNodeCount: 1, leafNodeCount: 1,
+      markdownIncluded: false, markdownBytes: 0, nodes: [{ key: 'stage', title: '阶段', status: 'in_progress', startDate: null,
+        endDate: null, summary: '', position: { x: 0, y: 0 }, markdownBytes: 0,
+        steps: [{ key: 'step-one', title: '第一步', status: 'completed', startDate: null, endDate: null, summary: '' }] }], edges: [] });
+    expect(prompt).toContain('"key": "step-one"');
+    expect(prompt).toContain('子阶段 key 必须来自该节点上下文或本次 addSteps');
   });
 
   it('includes existing target markdown without exposing picker metadata', () => {

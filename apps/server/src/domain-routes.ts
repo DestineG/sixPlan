@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { deriveDateManagedNodeStatus, NODE_STATUSES, PLAN_STATUSES, type GraphDto } from '@sixplan/shared';
+import { deriveDateManagedNodeStatus, NODE_STATUSES, PLAN_STATUSES, type ActivePlanDto, type GraphDto } from '@sixplan/shared';
 import { z } from 'zod';
 import { requireReadyUser } from './auth.js';
 import { AppError } from './errors.js';
 import { wouldCreateCycle } from './graph.js';
 import { assertPlanningStatusAllowed, promotePlanningPlan } from './plan-status.js';
+import { aggregateStepStatus, replaceNodeSteps, replaceNodeStepsBody, updateNodeAggregate } from './node-steps.js';
 import {
-  ensureEditable, ensureVersion, getArea, getNode, getPlan, mapArea, mapEdge, mapNode, mapPlan,
-  type AreaRow, type EdgeRow, type NodeRow, type PlanRow
+  ensureEditable, ensureVersion, getArea, getNode, getNodeDto, getNodeSteps, getPlan, insertPlanRecord, mapArea, mapEdge, mapNode, mapNodeStep, mapPlan,
+  type AreaRow, type EdgeRow, type NodeRow, type NodeStepRow, type PlanRow
 } from './repository.js';
 
 const idParams = z.object({ id: z.string().uuid() });
@@ -122,6 +123,28 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     return { plans: rows.map(mapPlan) };
   });
 
+  app.get('/api/plans/active', async (request) => {
+    const rows = app.database.sqlite.prepare(`SELECT p.*, a.name AS area_name, a.user_id,
+      (SELECT COUNT(*) FROM nodes n WHERE n.plan_id = p.id) AS node_count
+      FROM plans p JOIN areas a ON a.id = p.area_id
+      WHERE a.user_id = ? AND p.archived_at IS NULL AND p.status = 'active'
+      ORDER BY p.updated_at DESC, p.id`).all(request.currentUser!.id) as PlanRow[];
+    const plans: ActivePlanDto[] = rows.map((row) => {
+      const activeNodes = app.database.sqlite.prepare("SELECT * FROM nodes WHERE plan_id = ? AND status = 'in_progress' ORDER BY created_at")
+        .all(row.id) as NodeRow[];
+      return {
+        ...mapPlan(row),
+        activeNodes: activeNodes.map((node) => {
+          const steps = getNodeSteps(app, node.id);
+          return { id: node.id, title: node.title, status: node.status, startDate: node.start_date, endDate: node.end_date,
+            summary: node.summary, completedStepCount: steps.filter((step) => step.status === 'completed').length,
+            stepCount: steps.length, activeSteps: steps.filter((step) => step.status === 'in_progress').map(mapNodeStep) };
+        })
+      };
+    });
+    return { plans };
+  });
+
   app.delete('/api/plans/archived/batch', async (request) => {
     const body = z.object({ items: z.array(z.object({ id: z.string().uuid(), expectedVersion: z.number().int().positive() })).min(1).max(500) })
       .refine((value) => new Set(value.items.map((item) => item.id)).size === value.items.length, '计划不能重复选择').parse(request.body);
@@ -144,9 +167,8 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const row: PlanRow = { id: randomUUID(), area_id: area.id, area_name: area.name, user_id: area.user_id,
       name: body.name, description: body.description, status: body.status, archived_at: null, version: 1,
       graph_revision: 1, created_at: now, updated_at: now, node_count: 0 };
-    app.database.sqlite.prepare(`INSERT INTO plans
-      (id,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
-      VALUES (@id,@area_id,@name,@description,@status,@archived_at,@version,@graph_revision,@created_at,@updated_at)`).run(row);
+    insertPlanRecord(app, { id: row.id, areaId: row.area_id, name: row.name, description: row.description, status: row.status,
+      archivedAt: row.archived_at, version: row.version, graphRevision: row.graph_revision, createdAt: row.created_at, updatedAt: row.updated_at });
     reply.code(201);
     return { plan: mapPlan(row) };
   });
@@ -216,7 +238,7 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const plan = getPlan(app, request.currentUser!.id, planId);
     const nodeRows = app.database.sqlite.prepare('SELECT * FROM nodes WHERE plan_id = ? ORDER BY created_at').all(planId) as NodeRow[];
     const edgeRows = app.database.sqlite.prepare('SELECT * FROM edges WHERE plan_id = ? ORDER BY created_at').all(planId) as EdgeRow[];
-    const graph: GraphDto = { plan: mapPlan(plan), nodes: nodeRows.map(mapNode), edges: edgeRows.map(mapEdge) };
+    const graph: GraphDto = { plan: mapPlan(plan), nodes: nodeRows.map((node) => mapNode(node, getNodeSteps(app, node.id))), edges: edgeRows.map(mapEdge) };
     return { graph };
   });
 
@@ -224,16 +246,30 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const { planId } = planParams.parse(request.params);
     const { today } = z.object({ today: requiredDateOnly }).parse(request.body);
     const plan = getPlan(app, request.currentUser!.id, planId); ensureEditable(plan);
-    const rows = app.database.sqlite.prepare("SELECT * FROM nodes WHERE plan_id = ? AND status IN ('not_started', 'in_progress') ORDER BY created_at")
-      .all(planId) as NodeRow[];
-    const changed = rows.filter((row) => deriveDateManagedNodeStatus(row.status, row.start_date, today) !== row.status);
+    const rows = app.database.sqlite.prepare('SELECT * FROM nodes WHERE plan_id = ? ORDER BY created_at').all(planId) as NodeRow[];
+    const steps = app.database.sqlite.prepare(`SELECT s.* FROM node_steps s JOIN nodes n ON n.id=s.node_id
+      WHERE n.plan_id=? ORDER BY s.node_id,s.sort_order`).all(planId) as NodeStepRow[];
+    const stepsByNode = new Map<string, NodeStepRow[]>();
+    for (const step of steps) stepsByNode.set(step.node_id, [...(stepsByNode.get(step.node_id) ?? []), step]);
     const now = new Date().toISOString();
     const update = app.database.sqlite.prepare('UPDATE nodes SET status = ?, version = version + 1, updated_at = ? WHERE id = ?');
     const result = app.database.sqlite.transaction(() => {
-      const updated = changed.map((row) => {
-        update.run(deriveDateManagedNodeStatus(row.status, row.start_date, today), now, row.id);
-        return mapNode(getNode(app, request.currentUser!.id, row.id));
-      });
+      const changedNodeIds = new Set<string>();
+      const updateStep = app.database.sqlite.prepare('UPDATE node_steps SET status=?,version=version+1,updated_at=? WHERE id=?');
+      for (const step of steps) {
+        const status = deriveDateManagedNodeStatus(step.status, step.start_date, today);
+        if (status !== step.status) { updateStep.run(status, now, step.id); changedNodeIds.add(step.node_id); }
+      }
+      for (const row of rows) {
+        const nodeSteps = stepsByNode.get(row.id) ?? [];
+        if (nodeSteps.length) {
+          if (changedNodeIds.has(row.id)) updateNodeAggregate(app, row, getNodeSteps(app, row.id), now);
+          continue;
+        }
+        const status = deriveDateManagedNodeStatus(row.status, row.start_date, today);
+        if (status !== row.status) { update.run(status, now, row.id); changedNodeIds.add(row.id); }
+      }
+      const updated = [...changedNodeIds].map((id) => getNodeDto(app, request.currentUser!.id, id));
       return { updated, autoActivated: promotePlanningPlan(app, planId, now) };
     })();
     return { nodes: result.updated, plan: mapPlan(getPlan(app, request.currentUser!.id, planId)), autoActivated: result.autoActivated };
@@ -257,23 +293,35 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     reply.code(201); return { node: mapNode(row) };
   });
 
+  app.put('/api/nodes/:nodeId/steps', async (request) => {
+    const { nodeId } = nodeParams.parse(request.params);
+    return replaceNodeSteps(app, request.currentUser!.id, nodeId, replaceNodeStepsBody.parse(request.body));
+  });
+
   app.patch('/api/nodes/:nodeId', async (request) => {
     const { nodeId } = nodeParams.parse(request.params);
     const body = z.object({ title: z.string().trim().min(1).max(200).optional(), status: z.enum(NODE_STATUSES).optional(),
       startDate: dateOnly.optional(), endDate: dateOnly.optional(), summary: z.string().max(2000).optional(),
       extraContent: z.string().optional(), expectedVersion: z.number().int().positive() }).parse(request.body);
     const node = getNode(app, request.currentUser!.id, nodeId); ensureEditable(node); ensureVersion(node.version, body.expectedVersion);
+    const nodeSteps = getNodeSteps(app, nodeId);
+    if ((body.startDate !== undefined || body.endDate !== undefined) && nodeSteps.length > 0) {
+      throw new AppError(409, 'NODE_DATES_DERIVED', '节点日期由子阶段汇总，请在子阶段中调整');
+    }
     const startDate = body.startDate === undefined ? node.start_date : body.startDate;
     const endDate = body.endDate === undefined ? node.end_date : body.endDate;
     validateDates(startDate, endDate);
+    const requestedStatus = body.status ?? node.status;
+    const status = nodeSteps.length && requestedStatus !== 'paused' && requestedStatus !== 'abandoned'
+      ? aggregateStepStatus(requestedStatus, nodeSteps) : requestedStatus;
     const now = new Date().toISOString();
     const autoActivated = app.database.sqlite.transaction(() => {
       app.database.sqlite.prepare(`UPDATE nodes SET title = ?, status = ?, start_date = ?, end_date = ?, summary = ?, extra_content = ?,
-        version = version + 1, updated_at = ? WHERE id = ?`).run(body.title ?? node.title, body.status ?? node.status,
+        version = version + 1, updated_at = ? WHERE id = ?`).run(body.title ?? node.title, status,
         startDate, endDate, body.summary ?? node.summary, body.extraContent ?? node.extra_content, now, nodeId);
       return promotePlanningPlan(app, node.plan_id, now);
     })();
-    return { node: mapNode(getNode(app, request.currentUser!.id, nodeId)),
+    return { node: getNodeDto(app, request.currentUser!.id, nodeId),
       plan: mapPlan(getPlan(app, request.currentUser!.id, node.plan_id)), autoActivated };
   });
 
@@ -298,7 +346,7 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
       ensureVersion(node.version, position.expectedVersion);
       app.database.sqlite.prepare('UPDATE nodes SET position_x = ?, position_y = ?, version = version + 1, updated_at = ? WHERE id = ?')
         .run(position.positionX, position.positionY, new Date().toISOString(), position.id);
-      return mapNode(getNode(app, request.currentUser!.id, position.id));
+      return getNodeDto(app, request.currentUser!.id, position.id);
     }))();
     return { nodes: updated };
   });

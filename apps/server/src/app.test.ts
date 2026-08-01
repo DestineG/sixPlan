@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import type { InjectOptions, Response as InjectResponse } from 'light-my-request';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from './app.js';
-import type { AreaDto, AreaFile, EdgeDto, GraphDto, ImportResult, NodeDto, PlanDto } from '@sixplan/shared';
+import type { ActivePlanDto, AreaDto, AreaFile, EdgeDto, GraphDto, ImportResult, NodeDto, PlanDto } from '@sixplan/shared';
 import { collectBackup, decodeBackup, encodeBackup, restoreSiteBackup, restoreUserBackup } from './backup.js';
 import { createUser } from './auth.js';
 
@@ -130,6 +130,65 @@ describe('sixPlan API', () => {
     await request(cookie, 'PATCH', `/api/nodes/${node.id}`, { summary: '继续进行', expectedVersion: nodeAfterStart.version });
     const unchanged = (await request(cookie, 'GET', `/api/plans/${plan.id}`)).json<{ plan: PlanDto }>().plan;
     expect(unchanged.status).toBe('completed'); expect(unchanged.version).toBe(completed.version);
+  });
+
+  it('manages ordered node steps, aggregates the parent and exposes active work', async () => {
+    const cookie = await register('step-user');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '学习' })).json<{ area: AreaDto }>().area;
+    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '英语', status: 'active' })).json<{ plan: PlanDto }>().plan;
+    const created = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '四级阶段', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const parent = (await request(cookie, 'PATCH', `/api/nodes/${created.id}`, { status: 'in_progress', startDate: '2026-08-05',
+      endDate: '2026-08-20', expectedVersion: created.version })).json<{ node: NodeDto }>().node;
+    const saved = await request(cookie, 'PUT', `/api/nodes/${parent.id}/steps`, { expectedNodeVersion: parent.version, steps: [
+      { key: 'vocabulary', title: '词汇', status: 'completed', startDate: '2026-08-01', endDate: '2026-08-03', summary: '' },
+      { key: 'mock-exam', title: '真题模拟', status: 'in_progress', startDate: '2026-08-04', endDate: '2026-08-18', summary: '完成两套真题' }
+    ] });
+    expect(saved.statusCode).toBe(200);
+    const node = saved.json<{ node: NodeDto }>().node;
+    expect(node).toMatchObject({ status: 'in_progress', startDate: '2026-08-01', endDate: '2026-08-18' });
+    expect(node.steps.map((step) => step.key)).toEqual(['vocabulary', 'mock-exam']);
+
+    const stale = await request(cookie, 'PUT', `/api/nodes/${parent.id}/steps`, { expectedNodeVersion: parent.version, steps: [] });
+    expect(stale.statusCode).toBe(409); expect(stale.json()).toMatchObject({ code: 'VERSION_CONFLICT' });
+    const derivedDate = await request(cookie, 'PATCH', `/api/nodes/${parent.id}`, { startDate: '2026-08-02', expectedVersion: node.version });
+    expect(derivedDate.statusCode).toBe(409); expect(derivedDate.json()).toMatchObject({ code: 'NODE_DATES_DERIVED' });
+
+    const activePlans = (await request(cookie, 'GET', '/api/plans/active')).json<{ plans: ActivePlanDto[] }>().plans;
+    expect(activePlans).toHaveLength(1);
+    expect(activePlans[0]!.activeNodes[0]).toMatchObject({ id: node.id, stepCount: 2, completedStepCount: 1 });
+    expect(activePlans[0]!.activeNodes[0]!.activeSteps[0]).toMatchObject({ key: 'mock-exam', title: '真题模拟' });
+
+    const exported = (await request(cookie, 'GET', `/api/plans/${plan.id}/export`)).json<{ nodes: Array<{ steps: Array<{ key: string }> }> }>();
+    expect(exported.nodes[0]!.steps.map((step) => step.key)).toEqual(['vocabulary', 'mock-exam']);
+    const imported = await request(cookie, 'POST', '/api/plan-imports', { files: [{ fileName: 'english.plan.json', content: exported, targetAreaId: area.id }] });
+    const importedPlan = imported.json<{ results: ImportResult[] }>().results[0]!.plan!;
+    const importedGraph = (await request(cookie, 'GET', `/api/plans/${importedPlan.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(importedGraph.nodes[0]!.steps.map((step) => step.key)).toEqual(['vocabulary', 'mock-exam']);
+  });
+
+  it('applies scoped incremental step changes and preserves their order', async () => {
+    const cookie = await register('step-ai-user');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '训练' })).json<{ area: AreaDto }>().area;
+    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '训练计划' })).json<{ plan: PlanDto }>().plan;
+    const node = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '基础阶段', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const other = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '恢复阶段', positionX: 300, positionY: 0 })).json<{ node: NodeDto }>().node;
+    await request(cookie, 'PUT', `/api/nodes/${node.id}/steps`, { expectedNodeVersion: node.version,
+      steps: [{ key: 'warm-up', title: '热身', status: 'not_started', startDate: null, endDate: null, summary: '' }] });
+    const current = (await request(cookie, 'GET', `/api/plans/${plan.id}`)).json<{ plan: PlanDto }>().plan;
+    const changeset = { format: 'sixplan-plan-changeset', version: 2, targetPlanName: plan.name, baseRevision: current.graphRevision,
+      operations: { addSteps: [{ nodeKey: node.key, step: { key: 'main-set', title: '主训练', status: 'in_progress' } }],
+      updateSteps: [{ nodeKey: node.key, key: 'warm-up', changes: { summary: '按计划完成热身' } }],
+      reorderSteps: [{ nodeKey: node.key, keys: ['main-set', 'warm-up'] }] } };
+    const rejected = await request(cookie, 'POST', '/api/import-sessions/json', { content: changeset, targetPlanId: plan.id, promptTargetKeys: [other.key] });
+    expect(rejected.statusCode).toBe(400); expect(rejected.json()).toMatchObject({ code: 'PROMPT_SCOPE_VIOLATION' });
+    const session = await request(cookie, 'POST', '/api/import-sessions/json', { content: changeset, targetPlanId: plan.id, promptTargetKeys: [node.key] });
+    expect(session.statusCode).toBe(200); const preview = session.json<{ preview: { sessionId: string; addStepCount: number; reorderStepCount: number } }>().preview;
+    expect(preview).toMatchObject({ addStepCount: 1, reorderStepCount: 1 });
+    const applied = await request(cookie, 'POST', `/api/import-sessions/${preview.sessionId}/apply`, {});
+    expect(applied.statusCode).toBe(200);
+    const graph = (await request(cookie, 'GET', `/api/plans/${plan.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(graph.nodes[0]!.steps.map((step) => step.key)).toEqual(['main-set', 'warm-up']);
+    expect(graph.nodes[0]!.steps[1]!.summary).toBe('按计划完成热身');
   });
 
   it('atomically batch-deletes archived plans', async () => {

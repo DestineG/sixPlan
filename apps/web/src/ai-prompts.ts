@@ -5,6 +5,7 @@ export interface PromptContextNode {
   startDate: string | null;
   endDate: string | null;
   summary: string;
+  steps?: Array<{ key: string; title: string; status: string; startDate: string | null; endDate: string | null; summary: string }>;
   position: { x: number; y: number };
   markdownBytes: number;
   markdown?: string;
@@ -40,6 +41,9 @@ const fieldGuide = `sixPlan 界面字段与 JSON 字段严格对应：
 - “开始日期”和“结束日期”对应 startDate 和 endDate。
 - “简短说明”或“摘要”对应 summary，只保存简短概述。
 - “附加信息”“详细内容”“详细计划”或“Markdown”对应 markdown，用于完整的 Markdown 长文本。
+- “子阶段”对应节点的 steps 数组，只用于该节点内部的一层有序步骤；每项包含 key、title、status、startDate、endDate、summary。
+- 子阶段不包含 Markdown、不参与连接，也不能继续嵌套。并行、分支、依赖或多层结构应建成普通节点和边。
+- 不要默认给每个节点添加子阶段；只有用户想法确实包含某阶段内部的顺序拆解时才使用 steps。
 - “画布坐标”对应 position: { x, y }，没有明确要求时不要输出，由 sixPlan 自动布局。
 - summary 和 markdown 是两个独立字段；详细计划不得写入 summary。
 - updateNodes 中出现 markdown 就会完整覆盖原附加信息；不修改附加信息时必须省略 markdown。`;
@@ -51,7 +55,11 @@ const changeSetContract = `sixPlan v2 增量协议（以下能力始终可用，
 - operations.updateNodes：使用 { "key": "现有节点 key", "changes": { ... } } 更新节点；changes 可包含 title、status、startDate、endDate、summary、markdown、position，且至少包含一个字段。
 - operations.removeNodes：要删除的现有节点 key 字符串数组。
 - operations.addEdges 和 removeEdges：使用 { "source": "前置节点 key", "target": "后继节点 key" } 表示连接。
-- operations 必须存在；五个操作数组都可省略，禁止为了补齐格式而输出无关操作。
+- operations.addSteps：使用 { "nodeKey": "所属节点 key", "index": 0, "step": { ... } } 新增子阶段；index 可省略，省略时追加到末尾。
+- operations.updateSteps：使用 { "nodeKey": "所属节点 key", "key": "现有子阶段 key", "changes": { ... } } 修改子阶段。
+- operations.removeSteps：使用 { "nodeKey": "所属节点 key", "key": "现有子阶段 key" } 删除子阶段。
+- operations.reorderSteps：使用 { "nodeKey": "所属节点 key", "keys": ["完整的子阶段 key 顺序"] } 重排；keys 必须完整且不能重复。
+- operations 必须存在；所有操作数组都可省略，禁止为了补齐格式而输出无关操作。
 - addNodes 中未给 status 时默认为 not_started，日期默认为 null，summary 和 markdown 默认为空字符串。
 - createdAt 和 updatedAt 只用于保留已知的原始时间；当前任务中不要编造，应当省略。
 - position 通常省略，sixPlan 会为新增节点自动布局。`;
@@ -83,13 +91,16 @@ ${fieldGuide}
       "startDate": null,
       "endDate": null,
       "summary": "可选摘要",
-      "markdown": "可选 Markdown"
+      "markdown": "可选 Markdown",
+      "steps": [
+        { "key": "ordered-step-key", "title": "有序子阶段", "status": "not_started", "startDate": null, "endDate": null, "summary": "可选简短说明" }
+      ]
     }
   ],
   "edges": [{ "source": "prerequisite-key", "target": "dependent-key" }]
 }
 
-status、日期、description、summary、markdown 和 position 都可以省略。请优先生成清晰、可持续追加的阶段节点；不要输出 position，sixPlan 会从左到右自动布局。`;
+status、日期、description、summary、markdown、steps 和 position 都可以省略。请优先生成清晰、可持续追加的阶段节点；仅在节点内部确有顺序步骤时使用 steps。不要输出 position，sixPlan 会从左到右自动布局。`;
 }
 
 export function buildChangeSetPrompt(idea: string, context: PromptContext): string {
@@ -98,7 +109,8 @@ export function buildChangeSetPrompt(idea: string, context: PromptContext): stri
       : `自定义节点（${context.targetKeys.length}/${context.totalNodeCount}）`;
   const readableContext = { plan: context.plan,
     nodes: context.nodes.map((node) => ({ key: node.key, title: node.title, status: node.status, startDate: node.startDate,
-      endDate: node.endDate, summary: node.summary, ...(node.markdown === undefined ? {} : { markdown: node.markdown }) })), edges: context.edges };
+      endDate: node.endDate, summary: node.summary, steps: node.steps ?? [],
+      ...(node.markdown === undefined ? {} : { markdown: node.markdown }) })), edges: context.edges };
   const markdownRule = context.markdownIncluded
     ? `- 已提供目标节点现有 markdown（共 ${context.markdownBytes} 字节），可用于理解和改写；若更新 markdown，仍须输出完整替换内容。`
     : '- 当前上下文故意不包含旧 markdown；任何 markdown 更新都是完整覆盖。';
@@ -118,6 +130,7 @@ ${commonRules}
 ${fieldGuide}
 ${changeSetContract}
 - updateNodes 和 removeNodes 只能引用“允许操作的现有节点 key”。范围外节点仅供理解，不得修改或删除。
+- addSteps、updateSteps、removeSteps 和 reorderSteps 的 nodeKey 只能是“允许操作的现有节点 key”；子阶段 key 必须来自该节点上下文或本次 addSteps。
 - addNodes 可以声明全新 key；涉及现有节点的新增或删除连接只能使用允许操作的 key。
 - 操作范围表示哪些现有节点可以被修改，不代表必须修改范围内每一个节点；是否需要覆盖全部目标以用户想法为准。
 - 如果用户明确说“每个”“全部”或“所有”，应对操作范围内的每一个目标节点完成要求。

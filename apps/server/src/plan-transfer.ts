@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import {
   PlanChangeSetSchema, PlanSnapshotPayloadSchema, PlanSnapshotSchema,
-  type ImportPreviewDto, type PlanChangeSet, type PlanSnapshot, type PlanSnapshotNode, type PlanSnapshotPayload
+  type ImportPreviewDto, type PlanChangeSet, type PlanSnapshot, type PlanSnapshotNode, type PlanSnapshotPayload, type PlanSnapshotStep
 } from '@sixplan/shared';
 import { AppError } from './errors.js';
 import { isDag } from './graph.js';
 import { normalizeImportedPlanStatus, promotePlanningPlan } from './plan-status.js';
-import { getPlan, mapPlan, type EdgeRow, type NodeRow } from './repository.js';
+import { aggregateStepStatus, updateNodeAggregate, validateStepDates } from './node-steps.js';
+import { getNodeSteps, getPlan, insertPlanRecord, mapPlan, type EdgeRow, type NodeRow } from './repository.js';
 
 function validDateOnly(value: string | null): boolean {
   if (!value) return true;
@@ -34,6 +35,18 @@ export function validateSnapshotPayload(input: unknown): PlanSnapshotPayload {
     }
     if (isAfter(node.createdAt, node.updatedAt)) {
       throw new AppError(400, 'INVALID_TIMESTAMP_RANGE', `节点 ${node.key} 的修改时间不得早于创建时间`);
+    }
+    const stepKeys = new Set<string>();
+    for (const step of node.steps) {
+      if (stepKeys.has(step.key)) throw new AppError(400, 'DUPLICATE_STEP_KEY', `节点 ${node.key} 的子阶段 key 重复：${step.key}`);
+      stepKeys.add(step.key);
+      if (!validDateOnly(step.startDate) || !validDateOnly(step.endDate)) {
+        throw new AppError(400, 'INVALID_DATE', `子阶段 ${node.key}/${step.key} 包含不存在的日期`);
+      }
+      validateStepDates(step.startDate, step.endDate, `子阶段 ${node.key}/${step.key}`);
+      if (isAfter(step.createdAt, step.updatedAt)) {
+        throw new AppError(400, 'INVALID_TIMESTAMP_RANGE', `子阶段 ${node.key}/${step.key} 的修改时间不得早于创建时间`);
+      }
     }
   }
   if (isAfter(payload.plan.createdAt, payload.plan.updatedAt)) {
@@ -101,6 +114,8 @@ export function createSnapshotPayload(app: FastifyInstance, userId: string, plan
       createdAt: plan.created_at, updatedAt: plan.updated_at },
     nodes: nodes.map((node) => ({ key: node.node_key, title: node.title, status: node.status, startDate: node.start_date,
       endDate: node.end_date, summary: node.summary, markdown: node.extra_content,
+      steps: getNodeSteps(app, node.id).map((step) => ({ key: step.step_key, title: step.title, status: step.status,
+        startDate: step.start_date, endDate: step.end_date, summary: step.summary, createdAt: step.created_at, updatedAt: step.updated_at })),
       position: { x: node.position_x, y: node.position_y }, createdAt: node.created_at, updatedAt: node.updated_at })),
     edges: edges.map((edge) => ({ source: keys.get(edge.source_node_id)!, target: keys.get(edge.target_node_id)!,
       createdAt: edge.created_at, updatedAt: edge.updated_at }))
@@ -120,10 +135,8 @@ export function insertSnapshot(app: FastifyInstance, userId: string, areaId: str
   const now = new Date().toISOString();
   const createdAt = payload.plan.createdAt ?? now;
   const updatedAt = payload.plan.updatedAt ?? createdAt;
-  app.database.sqlite.prepare(`INSERT INTO plans
-    (id,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,1,1,?,?)`).run(planId, areaId, payload.plan.name, payload.plan.description, normalized.status,
-      payload.plan.archivedAt, createdAt, updatedAt);
+  insertPlanRecord(app, { id: planId, areaId, name: payload.plan.name, description: payload.plan.description,
+    status: normalized.status, archivedAt: payload.plan.archivedAt, version: 1, graphRevision: 1, createdAt, updatedAt });
   const idByKey = new Map<string, string>();
   const insertNode = app.database.sqlite.prepare(`INSERT INTO nodes
     (id,plan_id,node_key,title,status,start_date,end_date,summary,extra_content,position_x,position_y,version,created_at,updated_at)
@@ -134,6 +147,19 @@ export function insertSnapshot(app: FastifyInstance, userId: string, areaId: str
     const nodeCreated = node.createdAt ?? now;
     insertNode.run(id, planId, node.key, node.title, node.status, node.startDate, node.endDate, node.summary, node.markdown,
       node.position!.x, node.position!.y, nodeCreated, node.updatedAt ?? nodeCreated);
+    const insertStep = app.database.sqlite.prepare(`INSERT INTO node_steps
+      (id,node_id,step_key,title,status,start_date,end_date,summary,sort_order,version,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,1,?,?)`);
+    node.steps.forEach((step, index) => {
+      const createdAt = step.createdAt ?? now;
+      insertStep.run(randomUUID(), id, step.key, step.title, step.status, step.startDate, step.endDate, step.summary,
+        index, createdAt, step.updatedAt ?? createdAt);
+    });
+    if (node.steps.length) updateNodeAggregate(app, {
+      id, plan_id: planId, node_key: node.key, title: node.title, status: node.status, start_date: node.startDate,
+      end_date: node.endDate, summary: node.summary, extra_content: node.markdown, position_x: node.position!.x,
+      position_y: node.position!.y, version: 1, created_at: nodeCreated, updated_at: node.updatedAt ?? nodeCreated
+    }, getNodeSteps(app, id), node.updatedAt ?? nodeCreated, false);
   }
   const insertEdge = app.database.sqlite.prepare(`INSERT INTO edges
     (id,plan_id,source_node_id,target_node_id,version,created_at,updated_at) VALUES (?,?,?,?,1,?,?)`);
@@ -165,6 +191,17 @@ function assertUnique(values: string[], code: string, message: string): void {
   if (new Set(values).size !== values.length) throw new AppError(400, code, message);
 }
 
+function stepToken(nodeKey: string, key: string): string {
+  return `${nodeKey}\u0000${key}`;
+}
+
+function aggregateSnapshotNode(node: PlanSnapshotNode): PlanSnapshotNode {
+  if (node.steps.length === 0) return node;
+  const starts = node.steps.map((step) => step.startDate).filter((value): value is string => Boolean(value)).sort();
+  const ends = node.steps.map((step) => step.endDate).filter((value): value is string => Boolean(value)).sort();
+  return { ...node, status: aggregateStepStatus(node.status, node.steps), startDate: starts[0] ?? null, endDate: ends.at(-1) ?? null };
+}
+
 export function prepareChangeSet(
   app: FastifyInstance,
   userId: string,
@@ -184,7 +221,10 @@ export function prepareChangeSet(
   const keyById = new Map(currentNodes.map((node) => [node.id, node.node_key]));
   const nodes = new Map<string, PlanSnapshotNode>(currentNodes.map((node) => [node.node_key, {
     key: node.node_key, title: node.title, status: node.status, startDate: node.start_date, endDate: node.end_date,
-    summary: node.summary, markdown: node.extra_content, position: { x: node.position_x, y: node.position_y },
+    summary: node.summary, markdown: node.extra_content,
+    steps: getNodeSteps(app, node.id).map((step) => ({ key: step.step_key, title: step.title, status: step.status,
+      startDate: step.start_date, endDate: step.end_date, summary: step.summary, createdAt: step.created_at, updatedAt: step.updated_at })),
+    position: { x: node.position_x, y: node.position_y },
     createdAt: node.created_at, updatedAt: node.updated_at
   }]));
   const edges = new Set(currentEdges.map((edge) => edgeToken(keyById.get(edge.source_node_id)!, keyById.get(edge.target_node_id)!)));
@@ -195,6 +235,10 @@ export function prepareChangeSet(
   assertUnique(operations.removeNodes, 'DUPLICATE_OPERATION', '删除节点列表包含重复 key');
   assertUnique(operations.addEdges.map((edge) => edgeToken(edge.source, edge.target)), 'DUPLICATE_OPERATION', '新增连接列表包含重复项');
   assertUnique(operations.removeEdges.map((edge) => edgeToken(edge.source, edge.target)), 'DUPLICATE_OPERATION', '删除连接列表包含重复项');
+  assertUnique(operations.addSteps.map((item) => stepToken(item.nodeKey, item.step.key)), 'DUPLICATE_OPERATION', '新增子阶段列表包含重复项');
+  assertUnique(operations.updateSteps.map((item) => stepToken(item.nodeKey, item.key)), 'DUPLICATE_OPERATION', '更新子阶段列表包含重复项');
+  assertUnique(operations.removeSteps.map((item) => stepToken(item.nodeKey, item.key)), 'DUPLICATE_OPERATION', '删除子阶段列表包含重复项');
+  assertUnique(operations.reorderSteps.map((item) => item.nodeKey), 'DUPLICATE_OPERATION', '同一节点不能重复重排子阶段');
 
   const touched = new Set<string>();
   for (const key of operations.removeNodes) {
@@ -206,6 +250,9 @@ export function prepareChangeSet(
     const node = nodes.get(update.key);
     if (!node) throw new AppError(409, 'NODE_KEY_NOT_FOUND', `要更新的节点不存在：${update.key}`);
     if (touched.has(update.key)) throw new AppError(400, 'CONFLICTING_OPERATION', `节点 ${update.key} 同时出现在多个操作中`);
+    if (node.steps.length && (update.changes.startDate !== undefined || update.changes.endDate !== undefined)) {
+      throw new AppError(409, 'NODE_DATES_DERIVED', `节点 ${update.key} 的日期由子阶段汇总`);
+    }
     touched.add(update.key);
     nodes.set(update.key, { ...node, ...update.changes });
   }
@@ -213,8 +260,56 @@ export function prepareChangeSet(
     if (nodes.has(node.key)) throw new AppError(409, 'NODE_KEY_EXISTS', `节点 key 已存在：${node.key}`);
     if (touched.has(node.key)) throw new AppError(400, 'CONFLICTING_OPERATION', `节点 ${node.key} 同时出现在多个操作中`);
     touched.add(node.key);
-    nodes.set(node.key, node);
+    nodes.set(node.key, aggregateSnapshotNode(node));
   }
+  const stepTouched = new Set<string>();
+  const removedNodeKeys = new Set(operations.removeNodes);
+  const getStepNode = (nodeKey: string) => {
+    const node = nodes.get(nodeKey);
+    if (!node) throw new AppError(409, 'NODE_KEY_NOT_FOUND', `子阶段所属节点不存在：${nodeKey}`);
+    if (removedNodeKeys.has(nodeKey)) throw new AppError(400, 'CONFLICTING_OPERATION', `不能同时删除节点 ${nodeKey} 并修改其子阶段`);
+    return node;
+  };
+  for (const item of operations.addSteps) {
+    const token = stepToken(item.nodeKey, item.step.key);
+    if (stepTouched.has(token)) throw new AppError(400, 'CONFLICTING_OPERATION', `子阶段 ${item.nodeKey}/${item.step.key} 同时出现在多个操作中`);
+    stepTouched.add(token);
+    const node = getStepNode(item.nodeKey);
+    if (node.steps.some((step) => step.key === item.step.key)) throw new AppError(409, 'STEP_KEY_EXISTS', `子阶段 key 已存在：${item.nodeKey}/${item.step.key}`);
+    const steps = [...node.steps];
+    steps.splice(Math.min(item.index ?? steps.length, steps.length), 0, item.step);
+    nodes.set(item.nodeKey, { ...node, steps });
+  }
+  for (const item of operations.updateSteps) {
+    const token = stepToken(item.nodeKey, item.key);
+    if (stepTouched.has(token)) throw new AppError(400, 'CONFLICTING_OPERATION', `子阶段 ${item.nodeKey}/${item.key} 同时出现在多个操作中`);
+    stepTouched.add(token);
+    const node = getStepNode(item.nodeKey); const index = node.steps.findIndex((step) => step.key === item.key);
+    if (index < 0) throw new AppError(409, 'STEP_KEY_NOT_FOUND', `要更新的子阶段不存在：${item.nodeKey}/${item.key}`);
+    const steps = [...node.steps]; steps[index] = { ...steps[index]!, ...item.changes };
+    nodes.set(item.nodeKey, { ...node, steps });
+  }
+  for (const item of operations.removeSteps) {
+    const token = stepToken(item.nodeKey, item.key);
+    if (stepTouched.has(token)) throw new AppError(400, 'CONFLICTING_OPERATION', `子阶段 ${item.nodeKey}/${item.key} 同时出现在多个操作中`);
+    stepTouched.add(token);
+    const node = getStepNode(item.nodeKey);
+    if (!node.steps.some((step) => step.key === item.key)) throw new AppError(409, 'STEP_KEY_NOT_FOUND', `要删除的子阶段不存在：${item.nodeKey}/${item.key}`);
+    nodes.set(item.nodeKey, { ...node, steps: node.steps.filter((step) => step.key !== item.key) });
+  }
+  for (const item of operations.reorderSteps) {
+    const node = getStepNode(item.nodeKey);
+    if (new Set(item.keys).size !== item.keys.length || item.keys.length !== node.steps.length || item.keys.some((key) => !node.steps.some((step) => step.key === key))) {
+      throw new AppError(400, 'INVALID_STEP_ORDER', `节点 ${item.nodeKey} 的子阶段顺序必须完整且不能重复`);
+    }
+    const byKey = new Map(node.steps.map((step) => [step.key, step]));
+    nodes.set(item.nodeKey, { ...node, steps: item.keys.map((key) => byKey.get(key)!) });
+  }
+  const touchedStepNodes = new Set([
+    ...operations.addSteps.map((item) => item.nodeKey), ...operations.updateSteps.map((item) => item.nodeKey),
+    ...operations.removeSteps.map((item) => item.nodeKey), ...operations.reorderSteps.map((item) => item.nodeKey)
+  ]);
+  for (const nodeKey of touchedStepNodes) nodes.set(nodeKey, aggregateSnapshotNode(nodes.get(nodeKey)!));
   for (const edge of operations.removeEdges) {
     const token = edgeToken(edge.source, edge.target);
     if (!edges.has(token)) throw new AppError(409, 'EDGE_NOT_FOUND', `要删除的连接不存在：${edge.source} -> ${edge.target}`);
@@ -269,6 +364,8 @@ export function prepareChangeSet(
       nodeCount: nodes.size, edgeCount: edges.size, addNodeCount: operations.addNodes.length,
       updateNodeCount: operations.updateNodes.length, removeNodeCount: operations.removeNodes.length,
       addEdgeCount: operations.addEdges.length, removeEdgeCount: removedEdges.length,
+      addStepCount: operations.addSteps.length, updateStepCount: operations.updateSteps.length,
+      removeStepCount: operations.removeSteps.length, reorderStepCount: operations.reorderSteps.length,
       needsLayout: operations.addNodes.some((node) => !node.position), expiresAt, previewNodes, previewEdges
     }
   };
@@ -296,6 +393,27 @@ function placeNewNodes(prepared: PreparedChangeSet, currentNodes: NodeRow[]): Ma
     positions.set(node.key, candidate);
   }
   return positions;
+}
+
+function syncSnapshotSteps(app: FastifyInstance, nodeId: string, steps: PlanSnapshotStep[], now: string): void {
+  const existing = getNodeSteps(app, nodeId);
+  const byKey = new Map(existing.map((step) => [step.step_key, step]));
+  const retained = new Set(steps.map((step) => step.key));
+  const remove = app.database.sqlite.prepare('DELETE FROM node_steps WHERE id=?');
+  for (const step of existing) if (!retained.has(step.step_key)) remove.run(step.id);
+  const update = app.database.sqlite.prepare(`UPDATE node_steps SET title=?,status=?,start_date=?,end_date=?,summary=?,sort_order=?,version=version+1,updated_at=? WHERE id=?`);
+  const insert = app.database.sqlite.prepare(`INSERT INTO node_steps
+    (id,node_id,step_key,title,status,start_date,end_date,summary,sort_order,version,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,1,?,?)`);
+  steps.forEach((step, index) => {
+    const current = byKey.get(step.key);
+    if (current) update.run(step.title, step.status, step.startDate, step.endDate, step.summary, index, now, current.id);
+    else {
+      const createdAt = step.createdAt ?? now;
+      insert.run(randomUUID(), nodeId, step.key, step.title, step.status, step.startDate, step.endDate, step.summary,
+        index, createdAt, step.updatedAt ?? createdAt);
+    }
+  });
 }
 
 export function applyChangeSet(app: FastifyInstance, userId: string, planId: string, input: unknown, confirmedRevision?: number) {
@@ -334,11 +452,27 @@ export function applyChangeSet(app: FastifyInstance, userId: string, planId: str
         start_date: node.startDate, end_date: node.endDate, summary: node.summary, extra_content: node.markdown,
         position_x: position.x, position_y: position.y, version: 1, created_at: createdAt, updated_at: node.updatedAt ?? createdAt });
     }
+    const touchedStepNodes = new Set([
+      ...operations.addNodes.filter((node) => node.steps.length > 0).map((node) => node.key),
+      ...operations.addSteps.map((item) => item.nodeKey), ...operations.updateSteps.map((item) => item.nodeKey),
+      ...operations.removeSteps.map((item) => item.nodeKey), ...operations.reorderSteps.map((item) => item.nodeKey)
+    ]);
+    for (const nodeKey of touchedStepNodes) {
+      const row = nodeByKey.get(nodeKey)!; const finalNode = prepared.nodes.get(nodeKey)!;
+      syncSnapshotSteps(app, row.id, finalNode.steps, now);
+      if (finalNode.steps.length) {
+        app.database.sqlite.prepare(`UPDATE nodes SET status=?,start_date=?,end_date=?,version=version+1,updated_at=? WHERE id=?`)
+          .run(finalNode.status, finalNode.startDate, finalNode.endDate, now, row.id);
+      } else {
+        app.database.sqlite.prepare('UPDATE nodes SET version=version+1,updated_at=? WHERE id=?').run(now, row.id);
+      }
+    }
     const insertEdge = app.database.sqlite.prepare(`INSERT INTO edges
       (id,plan_id,source_node_id,target_node_id,version,created_at,updated_at) VALUES (?,?,?,?,1,?,?)`);
     for (const edge of operations.addEdges) insertEdge.run(randomUUID(), planId, nodeByKey.get(edge.source)!.id, nodeByKey.get(edge.target)!.id, now, now);
 
-    const structural = operations.addNodes.length + operations.removeNodes.length + operations.addEdges.length + operations.removeEdges.length > 0;
+    const structural = operations.addNodes.length + operations.removeNodes.length + operations.addEdges.length + operations.removeEdges.length
+      + operations.addSteps.length + operations.removeSteps.length + operations.reorderSteps.length > 0;
     const metadata = prepared.changeSet.planChanges;
     if (metadata || structural) {
       app.database.sqlite.prepare(`UPDATE plans SET name=?,description=?,status=?,version=version+?,graph_revision=graph_revision+?,updated_at=? WHERE id=?`)

@@ -83,6 +83,38 @@ export interface NodeDto {
   version: number;
   createdAt: string;
   updatedAt: string;
+  steps: NodeStepDto[];
+}
+
+export interface NodeStepDto {
+  id: string;
+  nodeId: string;
+  key: string;
+  title: string;
+  status: NodeStatus;
+  startDate: string | null;
+  endDate: string | null;
+  summary: string;
+  sortOrder: number;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ActiveNodeSummaryDto {
+  id: string;
+  title: string;
+  status: NodeStatus;
+  startDate: string | null;
+  endDate: string | null;
+  summary: string;
+  completedStepCount: number;
+  stepCount: number;
+  activeSteps: NodeStepDto[];
+}
+
+export interface ActivePlanDto extends PlanDto {
+  activeNodes: ActiveNodeSummaryDto[];
 }
 
 export interface EdgeDto {
@@ -104,6 +136,17 @@ export interface GraphDto {
 export const NodeKeySchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/);
 export const IsoTimestampSchema = z.string().datetime();
 
+export const PlanSnapshotStepSchema = z.object({
+  key: NodeKeySchema,
+  title: z.string().trim().min(1).max(200),
+  status: NodeStatusSchema.default('not_started'),
+  startDate: DateOnlySchema.optional().default(null),
+  endDate: DateOnlySchema.optional().default(null),
+  summary: z.string().max(2000).optional().default(''),
+  createdAt: IsoTimestampSchema.optional(),
+  updatedAt: IsoTimestampSchema.optional()
+}).strict();
+
 export const PlanSnapshotNodeSchema = z.object({
   key: NodeKeySchema,
   title: z.string().trim().min(1).max(200),
@@ -112,6 +155,7 @@ export const PlanSnapshotNodeSchema = z.object({
   endDate: DateOnlySchema.optional().default(null),
   summary: z.string().max(2000).optional().default(''),
   markdown: z.string().optional().default(''),
+  steps: z.array(PlanSnapshotStepSchema).optional().default([]),
   position: z.object({ x: z.number().finite(), y: z.number().finite() }).strict().optional(),
   createdAt: IsoTimestampSchema.optional(),
   updatedAt: IsoTimestampSchema.optional()
@@ -160,6 +204,14 @@ const PlanChangesSchema = z.object({
   status: PlanStatusSchema.optional()
 }).strict().refine((value) => Object.keys(value).length > 0, 'planChanges 至少包含一个字段');
 
+const StepChangesSchema = z.object({
+  title: z.string().trim().min(1).max(200).optional(),
+  status: NodeStatusSchema.optional(),
+  startDate: DateOnlySchema.optional(),
+  endDate: DateOnlySchema.optional(),
+  summary: z.string().max(2000).optional()
+}).strict().refine((value) => Object.keys(value).length > 0, 'changes 至少包含一个字段');
+
 export const PlanChangeSetSchema = z.object({
   format: z.literal('sixplan-plan-changeset'),
   version: z.literal(2),
@@ -171,7 +223,11 @@ export const PlanChangeSetSchema = z.object({
     updateNodes: z.array(z.object({ key: NodeKeySchema, changes: NodeChangesSchema }).strict()).optional().default([]),
     removeNodes: z.array(NodeKeySchema).optional().default([]),
     addEdges: z.array(PlanSnapshotEdgeSchema.omit({ createdAt: true, updatedAt: true }).strict()).optional().default([]),
-    removeEdges: z.array(PlanSnapshotEdgeSchema.omit({ createdAt: true, updatedAt: true }).strict()).optional().default([])
+    removeEdges: z.array(PlanSnapshotEdgeSchema.omit({ createdAt: true, updatedAt: true }).strict()).optional().default([]),
+    addSteps: z.array(z.object({ nodeKey: NodeKeySchema, index: z.number().int().min(0).optional(), step: PlanSnapshotStepSchema }).strict()).optional().default([]),
+    updateSteps: z.array(z.object({ nodeKey: NodeKeySchema, key: NodeKeySchema, changes: StepChangesSchema }).strict()).optional().default([]),
+    removeSteps: z.array(z.object({ nodeKey: NodeKeySchema, key: NodeKeySchema }).strict()).optional().default([]),
+    reorderSteps: z.array(z.object({ nodeKey: NodeKeySchema, keys: z.array(NodeKeySchema) }).strict()).optional().default([])
   }).strict()
 }).strict();
 
@@ -184,6 +240,7 @@ export const AreaFileSchema = z.object({
 }).strict();
 
 export type PlanSnapshotNode = z.infer<typeof PlanSnapshotNodeSchema>;
+export type PlanSnapshotStep = z.infer<typeof PlanSnapshotStepSchema>;
 export type PlanSnapshotEdge = z.infer<typeof PlanSnapshotEdgeSchema>;
 export type PlanSnapshotPayload = z.infer<typeof PlanSnapshotPayloadSchema>;
 export type PlanSnapshot = z.infer<typeof PlanSnapshotSchema>;
@@ -214,6 +271,10 @@ export interface ImportPreviewDto {
   removeNodeCount: number;
   addEdgeCount: number;
   removeEdgeCount: number;
+  addStepCount: number;
+  updateStepCount: number;
+  removeStepCount: number;
+  reorderStepCount: number;
   needsLayout: boolean;
   expiresAt: string;
   previewNodes: Array<{ key: string; title: string; status: NodeStatus; change: 'existing' | 'add' | 'update' | 'remove' }>;
