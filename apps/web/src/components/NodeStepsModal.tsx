@@ -4,6 +4,7 @@ import { nodeStatusLabels, type GraphDto, type NodeDto, type NodeStepDto } from 
 import { toast } from 'sonner';
 import { api, ApiClientError } from '../api';
 import { deriveDateManagedNodeStatus, localToday } from '../date-utils';
+import { createRandomHex } from '../random';
 import { Modal } from './Dialogs';
 
 interface DraftStep extends NodeStepDto {
@@ -11,7 +12,7 @@ interface DraftStep extends NodeStepDto {
 }
 
 function draftKey(): string {
-  return `step-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`;
+  return `step-${createRandomHex(12)}`;
 }
 
 export function NodeStepsModal({ node, readOnly, onClose, onUpdated, onPlanUpdated }: {
@@ -83,7 +84,7 @@ export function NodeStepsModal({ node, readOnly, onClose, onUpdated, onPlanUpdat
 
   function addStep() {
     if (!node || readOnly) return;
-    const first = stepsRef.current.length === 0; const now = new Date().toISOString(); const id = `draft-${crypto.randomUUID()}`;
+    const first = stepsRef.current.length === 0; const now = new Date().toISOString(); const id = `draft-${createRandomHex(16)}`;
     const next: DraftStep = { id, nodeId: node.id, key: draftKey(), title: '新子阶段',
       status: first ? node.status : 'not_started', startDate: first ? node.startDate : null, endDate: first ? node.endDate : null,
       summary: '', sortOrder: stepsRef.current.length, version: 0, createdAt: now, updatedAt: now, isNew: true };
