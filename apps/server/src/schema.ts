@@ -49,6 +49,7 @@ export const plans = sqliteTable('plans', {
   status: text('status', { enum: ['planning', 'active', 'completed', 'paused'] }).notNull().default('planning'),
   archivedAt: text('archived_at'),
   version: integer('version').notNull().default(1),
+  graphRevision: integer('graph_revision').notNull().default(1),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull()
 });
@@ -56,6 +57,7 @@ export const plans = sqliteTable('plans', {
 export const nodes = sqliteTable('nodes', {
   id: text('id').primaryKey(),
   planId: text('plan_id').notNull().references(() => plans.id, { onDelete: 'cascade' }),
+  key: text('node_key').notNull(),
   title: text('title').notNull(),
   status: text('status', { enum: ['not_started', 'in_progress', 'completed', 'paused', 'abandoned'] }).notNull().default('not_started'),
   startDate: text('start_date'),
@@ -67,7 +69,7 @@ export const nodes = sqliteTable('nodes', {
   version: integer('version').notNull().default(1),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull()
-});
+}, (table) => [uniqueIndex('nodes_plan_key_unique').on(table.planId, table.key)]);
 
 export const edges = sqliteTable('edges', {
   id: text('id').primaryKey(),
@@ -78,3 +80,26 @@ export const edges = sqliteTable('edges', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull()
 }, (table) => [uniqueIndex('edges_direction_unique').on(table.planId, table.sourceNodeId, table.targetNodeId)]);
+
+export const userImportSettings = sqliteTable('user_import_settings', {
+  userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  maxNodes: integer('max_nodes').notNull().default(0),
+  maxEdges: integer('max_edges').notNull().default(0),
+  maxMarkdownBytes: integer('max_markdown_bytes').notNull().default(0),
+  maxFileBytes: integer('max_file_bytes').notNull().default(0),
+  sessionHours: integer('session_hours').notNull().default(24),
+  version: integer('version').notNull().default(1),
+  updatedAt: text('updated_at').notNull()
+});
+
+export const importSessions = sqliteTable('import_sessions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  kind: text('kind', { enum: ['snapshot', 'changeset'] }).notNull(),
+  filePath: text('file_path').notNull(),
+  status: text('status', { enum: ['ready', 'applied'] }).notNull().default('ready'),
+  targetPlanId: text('target_plan_id').references(() => plans.id, { onDelete: 'cascade' }),
+  sourceName: text('source_name').notNull().default('pasted.json'),
+  expiresAt: text('expires_at').notNull(),
+  createdAt: text('created_at').notNull()
+});

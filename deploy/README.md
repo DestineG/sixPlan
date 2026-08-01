@@ -65,6 +65,8 @@ FRP_AUTH_TOKEN=与frps完全相同的长随机十六进制令牌
 docker compose -f compose.yaml -f compose.frp.yaml up -d --build
 ```
 
+`.env.example` 还列出了计划 JSON 导入的服务端硬上限。保持默认值即可支持 512 MB 文件、50,000 个节点和 250,000 条连接；可按本地服务器内存和磁盘容量调低。网页设置中的个人限制只能进一步收紧，不能超过这些部署级上限。
+
 此时：
 
 - `http://本地服务器IP:4173` 直接访问 sixPlan。

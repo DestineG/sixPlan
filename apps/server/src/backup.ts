@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt as scryptCallback } from 'node:crypto';
 import { gzip, gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
+import { existsSync, unlinkSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AppError } from './errors.js';
@@ -21,6 +22,7 @@ const backupPayloadSchema = z.object({
   data: z.object({
     users: z.array(z.record(z.unknown())).optional(),
     settings: z.array(z.record(z.unknown())).optional(),
+    userSettings: z.array(z.record(z.unknown())).optional(),
     areas: z.array(z.record(z.unknown())), plans: z.array(z.record(z.unknown())),
     nodes: z.array(z.record(z.unknown())), edges: z.array(z.record(z.unknown()))
   })
@@ -32,12 +34,15 @@ const tableColumns: Record<string, string[]> = {
   users: ['id','username','username_normalized','password_hash','role','is_disabled','must_change_password','version','created_at','updated_at'],
   system_settings: ['key','value','version','updated_at'],
   areas: ['id','user_id','name','name_normalized','sort_order','version','created_at','updated_at'],
-  plans: ['id','area_id','name','description','status','archived_at','version','created_at','updated_at'],
-  nodes: ['id','plan_id','title','status','start_date','end_date','summary','extra_content','position_x','position_y','version','created_at','updated_at'],
+  plans: ['id','area_id','name','description','status','archived_at','version','graph_revision','created_at','updated_at'],
+  nodes: ['id','plan_id','node_key','title','status','start_date','end_date','summary','extra_content','position_x','position_y','version','created_at','updated_at'],
+  user_import_settings: ['user_id','max_nodes','max_edges','max_markdown_bytes','max_file_bytes','session_hours','version','updated_at'],
   edges: ['id','plan_id','source_node_id','target_node_id','version','created_at','updated_at']
 };
 
 function validateRows(payload: BackupPayload): void {
+  payload.data.plans.forEach((row) => { if (!('graph_revision' in row)) row.graph_revision = 1; });
+  payload.data.nodes.forEach((row) => { if (!('node_key' in row)) row.node_key = `node-${String(row.id).replaceAll('-', '').slice(0, 12).toLowerCase()}`; });
   const required = (table: keyof typeof payload.data, columns: string[]) => {
     const rows = payload.data[table];
     if (!Array.isArray(rows)) return;
@@ -74,8 +79,10 @@ export function collectBackup(app: FastifyInstance, scope: 'user' | 'site', user
     data: {
       ...(scope === 'site' ? {
         users: app.database.sqlite.prepare('SELECT * FROM users ORDER BY created_at').all() as Record<string, unknown>[],
-        settings: app.database.sqlite.prepare('SELECT * FROM system_settings').all() as Record<string, unknown>[]
+        settings: app.database.sqlite.prepare('SELECT * FROM system_settings').all() as Record<string, unknown>[],
+        userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings').all() as Record<string, unknown>[]
       } : {}),
+      ...(scope === 'user' ? { userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings WHERE user_id = ?').all(userId) as Record<string, unknown>[] } : {}),
       areas, plans, nodes, edges
     }
   };
@@ -134,27 +141,35 @@ function insertRows(app: FastifyInstance, table: string, rows: Record<string, un
 
 export function restoreUserBackup(app: FastifyInstance, userId: string, payload: BackupPayload): void {
   if (payload.scope !== 'user') throw new AppError(400, 'BACKUP_SCOPE_MISMATCH', '请选择用户级备份文件');
+  const importFiles = app.database.sqlite.prepare('SELECT file_path FROM import_sessions WHERE user_id = ?').all(userId) as Array<{ file_path: string }>;
   app.database.sqlite.transaction(() => {
+    app.database.sqlite.prepare('DELETE FROM import_sessions WHERE user_id = ?').run(userId);
     app.database.sqlite.prepare('DELETE FROM areas WHERE user_id = ?').run(userId);
+    app.database.sqlite.prepare('DELETE FROM user_import_settings WHERE user_id = ?').run(userId);
     const restoredAreas = payload.data.areas.map((row) => ({ ...row, user_id: userId }));
     insertRows(app, 'areas', restoredAreas);
     insertRows(app, 'plans', payload.data.plans);
     insertRows(app, 'nodes', payload.data.nodes);
     insertRows(app, 'edges', payload.data.edges);
+    if (payload.data.userSettings?.[0]) insertRows(app, 'user_import_settings', [{ ...payload.data.userSettings[0], user_id: userId }]);
   })();
+  for (const file of importFiles) if (existsSync(file.file_path)) unlinkSync(file.file_path);
 }
 
 export function restoreSiteBackup(app: FastifyInstance, payload: BackupPayload): void {
   if (payload.scope !== 'site' || !payload.data.users || !payload.data.settings) {
     throw new AppError(400, 'BACKUP_SCOPE_MISMATCH', '请选择全站备份文件');
   }
+  const importFiles = app.database.sqlite.prepare('SELECT file_path FROM import_sessions').all() as Array<{ file_path: string }>;
   app.database.sqlite.transaction(() => {
-    app.database.sqlite.exec('DELETE FROM sessions; DELETE FROM edges; DELETE FROM nodes; DELETE FROM plans; DELETE FROM areas; DELETE FROM system_settings; DELETE FROM users;');
+    app.database.sqlite.exec('DELETE FROM sessions; DELETE FROM import_sessions; DELETE FROM edges; DELETE FROM nodes; DELETE FROM plans; DELETE FROM areas; DELETE FROM user_import_settings; DELETE FROM system_settings; DELETE FROM users;');
     insertRows(app, 'users', payload.data.users!);
     insertRows(app, 'system_settings', payload.data.settings!);
     insertRows(app, 'areas', payload.data.areas);
     insertRows(app, 'plans', payload.data.plans);
     insertRows(app, 'nodes', payload.data.nodes);
     insertRows(app, 'edges', payload.data.edges);
+    if (payload.data.userSettings) insertRows(app, 'user_import_settings', payload.data.userSettings);
   })();
+  for (const file of importFiles) if (existsSync(file.file_path)) unlinkSync(file.file_path);
 }

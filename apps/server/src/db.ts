@@ -47,7 +47,30 @@ const migrations = [
   CREATE INDEX IF NOT EXISTS areas_user_idx ON areas(user_id);
   CREATE INDEX IF NOT EXISTS plans_area_idx ON plans(area_id);
   CREATE INDEX IF NOT EXISTS nodes_plan_idx ON nodes(plan_id);
-  CREATE INDEX IF NOT EXISTS edges_plan_idx ON edges(plan_id);`
+  CREATE INDEX IF NOT EXISTS edges_plan_idx ON edges(plan_id);`,
+  `ALTER TABLE plans ADD COLUMN graph_revision INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE nodes ADD COLUMN node_key TEXT;
+  UPDATE nodes SET node_key = 'node-' || lower(substr(replace(id, '-', ''), 1, 12)) WHERE node_key IS NULL;
+  CREATE UNIQUE INDEX nodes_plan_key_unique ON nodes(plan_id, node_key);
+  CREATE TABLE user_import_settings (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    max_nodes INTEGER NOT NULL DEFAULT 0, max_edges INTEGER NOT NULL DEFAULT 0,
+    max_markdown_bytes INTEGER NOT NULL DEFAULT 0, max_file_bytes INTEGER NOT NULL DEFAULT 0,
+    session_hours INTEGER NOT NULL DEFAULT 24, version INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL
+  );
+  CREATE TABLE import_sessions (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, file_path TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ready',
+    expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+  );
+  CREATE INDEX import_sessions_user_idx ON import_sessions(user_id);
+  CREATE INDEX import_sessions_expiry_idx ON import_sessions(expires_at);`,
+  `ALTER TABLE import_sessions ADD COLUMN target_plan_id TEXT REFERENCES plans(id) ON DELETE CASCADE;
+  ALTER TABLE import_sessions ADD COLUMN source_name TEXT NOT NULL DEFAULT 'pasted.json';`,
+  `CREATE TRIGGER IF NOT EXISTS nodes_node_key_required_insert BEFORE INSERT ON nodes WHEN NEW.node_key IS NULL
+    BEGIN SELECT RAISE(ABORT, 'node_key required'); END;
+  CREATE TRIGGER IF NOT EXISTS nodes_node_key_required_update BEFORE UPDATE OF node_key ON nodes WHEN NEW.node_key IS NULL
+    BEGIN SELECT RAISE(ABORT, 'node_key required'); END;`
 ];
 
 export interface DatabaseContext {

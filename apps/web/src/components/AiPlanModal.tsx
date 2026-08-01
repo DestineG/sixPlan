@@ -1,0 +1,172 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Clipboard, Download, FileJson, RefreshCw, Sparkles, Upload } from 'lucide-react';
+import { toast } from 'sonner';
+import type { AreaDto, ImportPreviewDto, PlanDto } from '@sixplan/shared';
+import { api, ApiClientError } from '../api';
+import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt } from '../ai-prompts';
+import { Modal } from './Dialogs';
+
+type Mode = 'snapshot' | 'changeset';
+interface PromptContext {
+  plan: { name: string; description: string; status: string; graphRevision: number };
+  nodes: Array<{ key: string; title: string; status: string; markdown?: string }>;
+  edges: Array<{ source: string; target: string }>;
+}
+
+function extractJson(text: string): string {
+  const matches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  if (matches.length === 1) {
+    if (!window.confirm('检测到一个 JSON 代码块。是否提取代码块内容后校验？')) throw new Error('cancelled');
+    return matches[0]![1]!.trim();
+  }
+  return text.trim();
+}
+
+function downloadText(text: string, name: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+  const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
+}
+
+export function AiPlanModal({ mode, areas, onClose, onApplied }: {
+  mode: Mode | null; areas: AreaDto[]; onClose: () => void; onApplied: (plan: PlanDto) => Promise<void>;
+}) {
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [idea, setIdea] = useState(''); const [areaHint, setAreaHint] = useState(''); const [planId, setPlanId] = useState('');
+  const [contextMode, setContextMode] = useState<'selection' | 'whole'>('selection'); const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [includeMarkdown, setIncludeMarkdown] = useState(false); const [graphContext, setGraphContext] = useState<PromptContext | null>(null);
+  const [plans, setPlans] = useState<PlanDto[]>([]); const [prompt, setPrompt] = useState(''); const [raw, setRaw] = useState('');
+  const [preview, setPreview] = useState<ImportPreviewDto | null>(null); const [repairPrompt, setRepairPrompt] = useState('');
+  const [areaMode, setAreaMode] = useState<'existing' | 'create'>('existing'); const [targetAreaId, setTargetAreaId] = useState('');
+  const [createAreaName, setCreateAreaName] = useState(''); const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!mode) return;
+    api<{ plans: PlanDto[] }>('/api/plans').then(({ plans: values }) => { setPlans(values); setPlanId((current) => current || values[0]?.id || ''); }).catch(() => undefined);
+  }, [mode]);
+  useEffect(() => {
+    if (!mode) return;
+    setIdea(''); setAreaHint(''); setPrompt(''); setRaw(''); setPreview(null); setRepairPrompt(''); setGraphContext(null);
+    setSelectedKeys([]); setContextMode('selection'); setIncludeMarkdown(false); setAreaMode('existing'); setTargetAreaId(areas[0]?.id ?? ''); setCreateAreaName('');
+  }, [areas, mode]);
+  useEffect(() => {
+    if (mode !== 'changeset' || !planId) { setGraphContext(null); return; }
+    const params = new URLSearchParams({ mode: 'whole', includeMarkdown: String(includeMarkdown) });
+    api<{ context: PromptContext }>(`/api/plans/${planId}/prompt-context?${params}`).then(({ context }) => {
+      setGraphContext(context); setSelectedKeys((current) => current.length ? current : context.nodes[0] ? [context.nodes[0].key] : []);
+    }).catch(() => setGraphContext(null));
+  }, [includeMarkdown, mode, planId]);
+
+  const selectedPlan = plans.find((plan) => plan.id === planId);
+  const visibleContext = useMemo(() => {
+    if (!graphContext || contextMode === 'whole' || selectedKeys.length === 0) return graphContext;
+    const keep = new Set(selectedKeys);
+    for (const edge of graphContext.edges) if (keep.has(edge.source) || keep.has(edge.target)) { keep.add(edge.source); keep.add(edge.target); }
+    return { ...graphContext, nodes: graphContext.nodes.filter((node) => keep.has(node.key)), edges: graphContext.edges.filter((edge) => keep.has(edge.source) && keep.has(edge.target)) };
+  }, [contextMode, graphContext, selectedKeys]);
+
+  async function makePrompt() {
+    if (!idea.trim()) return toast.error('请先描述你想要的计划或变更');
+    if (mode === 'snapshot') setPrompt(buildSnapshotPrompt(idea, areaHint));
+    else {
+      if (!visibleContext) return toast.error('正在加载计划上下文');
+      setPrompt(buildChangeSetPrompt(idea, visibleContext));
+    }
+    setRepairPrompt('');
+  }
+  async function copy(value: string) { await navigator.clipboard.writeText(value); toast.success('已复制到剪贴板'); }
+
+  async function validate(content: string, sourceName = 'pasted.json') {
+    let json: string;
+    try { json = extractJson(content); if (!json) return toast.error('请粘贴模型返回的 JSON'); JSON.parse(json); }
+    catch (error) { if (error instanceof Error && error.message === 'cancelled') return; setRepairPrompt(buildRepairPrompt(content, '不是有效的 JSON 文本')); return toast.error('不是有效的 JSON 文本'); }
+    setBusy(true); setRepairPrompt('');
+    try {
+      const result = await api<{ preview: ImportPreviewDto }>('/api/import-sessions/json', { method: 'POST', body: JSON.stringify({ content: json, sourceName, ...(mode === 'changeset' ? { targetPlanId: planId } : {}) }) });
+      setRaw(json); setPreview(result.preview);
+      if (result.preview.kind === 'snapshot') {
+        const matching = areas.find((area) => area.name.toLocaleLowerCase() === (result.preview.suggestedAreaName ?? '').toLocaleLowerCase());
+        if (matching) { setAreaMode('existing'); setTargetAreaId(matching.id); }
+        else if (result.preview.suggestedAreaName) { setAreaMode('create'); setCreateAreaName(result.preview.suggestedAreaName); }
+      }
+    } catch (error) {
+      const message = error instanceof ApiClientError ? error.message : '校验失败'; setRepairPrompt(buildRepairPrompt(json, message)); toast.error(message);
+    } finally { setBusy(false); }
+  }
+
+  async function upload(file: File | undefined) {
+    if (!file) return; setBusy(true); setRepairPrompt('');
+    try {
+      const form = new FormData(); form.append('file', file);
+      const query = mode === 'changeset' ? `?targetPlanId=${encodeURIComponent(planId)}` : '';
+      const result = await api<{ preview: ImportPreviewDto }>(`/api/import-sessions/upload${query}`, { method: 'POST', body: form });
+      setRaw(''); setPreview(result.preview);
+      if (result.preview.kind === 'snapshot') {
+        const matching = areas.find((area) => area.name.toLocaleLowerCase() === (result.preview.suggestedAreaName ?? '').toLocaleLowerCase());
+        if (matching) { setAreaMode('existing'); setTargetAreaId(matching.id); }
+        else if (result.preview.suggestedAreaName) { setAreaMode('create'); setCreateAreaName(result.preview.suggestedAreaName); }
+      }
+    } catch (error) { const message = error instanceof ApiClientError ? error.message : '上传校验失败'; toast.error(message); }
+    finally { setBusy(false); if (fileInput.current) fileInput.current.value = ''; }
+  }
+
+  async function apply(confirmedRevision?: number) {
+    if (!preview) return;
+    if (preview.kind === 'snapshot' && areaMode === 'existing' && !targetAreaId) return toast.error('请选择目标领域');
+    if (preview.kind === 'snapshot' && areaMode === 'create' && !createAreaName.trim()) return toast.error('请输入新领域名称');
+    if (preview.removeNodeCount + preview.removeEdgeCount > 0 && !window.confirm(`本次会删除 ${preview.removeNodeCount} 个节点和 ${preview.removeEdgeCount} 条连接。是否继续？`)) return;
+    setBusy(true);
+    try {
+      const body = preview.kind === 'snapshot'
+        ? areaMode === 'existing' ? { targetAreaId } : { createAreaName }
+        : { ...(confirmedRevision ? { confirmedRevision } : {}) };
+      const { plan } = await api<{ plan: PlanDto }>(`/api/import-sessions/${preview.sessionId}/apply`, { method: 'POST', body: JSON.stringify(body) });
+      toast.success(preview.kind === 'snapshot' ? '新计划已导入' : '计划增量已应用'); await onApplied(plan); onClose();
+    } catch (error) {
+      if (error instanceof ApiClientError && error.code === 'REVISION_RECONFIRM_REQUIRED' && error.details) {
+        const refreshed = error.details as ImportPreviewDto; setPreview({ ...refreshed, sessionId: preview.sessionId });
+        if (window.confirm('计划图在提示词生成后发生了变化。变更已在最新图上重新校验，是否查看刷新后的预览并再次确认？')) toast.warning('预览已刷新，请再次点击应用');
+      } else toast.error(error instanceof ApiClientError ? error.message : '应用失败');
+    } finally { setBusy(false); }
+  }
+
+  async function close() {
+    if (preview) await api(`/api/import-sessions/${preview.sessionId}`, { method: 'DELETE' }).catch(() => undefined);
+    onClose();
+  }
+
+  return <Modal open={Boolean(mode)} onOpenChange={(open) => { if (!open) void close(); }}
+    title={mode === 'snapshot' ? 'AI 生成新计划' : 'AI 扩展现有计划'} description="sixPlan 只构造提示词和校验 JSON，不会连接或调用任何大模型。" wide>
+    <div className="ai-workflow">
+      <section className="ai-step"><div className="ai-step-title"><span>1</span><strong>描述需求</strong></div>
+        {mode === 'changeset' && <label>目标计划<select value={planId} onChange={(event) => { setPlanId(event.target.value); setPrompt(''); setPreview(null); }}>{plans.map((plan) => <option key={plan.id} value={plan.id}>{plan.name} · {plan.areaName}</option>)}</select></label>}
+        <label>你的想法<textarea rows={4} value={idea} onChange={(event) => setIdea(event.target.value)} placeholder={mode === 'snapshot' ? '例如：为半程马拉松准备一个分阶段训练计划' : '例如：在当前阶段后追加四周恢复训练'} /></label>
+        <details className="ai-advanced"><summary>高级选项</summary>
+          {mode === 'snapshot' ? <label>建议领域<input value={areaHint} onChange={(event) => setAreaHint(event.target.value)} placeholder="可选，导入时仍由你确认" /></label>
+          : <><div className="segmented"><button className={contextMode === 'selection' ? 'active' : ''} onClick={() => setContextMode('selection')}>选中节点及相邻节点</button><button className={contextMode === 'whole' ? 'active' : ''} onClick={() => setContextMode('whole')}>精简全图</button></div>
+            {contextMode === 'selection' && <div className="node-key-picker">{graphContext?.nodes.map((node) => <label key={node.key}><input type="checkbox" checked={selectedKeys.includes(node.key)} onChange={(event) => setSelectedKeys((current) => event.target.checked ? [...current, node.key] : current.filter((key) => key !== node.key))} /><span>{node.title}</span><code>{node.key}</code></label>)}</div>}
+            <label className="check-row"><input type="checkbox" checked={includeMarkdown} onChange={(event) => setIncludeMarkdown(event.target.checked)} />在上下文中包含 Markdown</label></>}
+        </details>
+        <button className="primary-button" disabled={busy || (mode === 'changeset' && !selectedPlan)} onClick={makePrompt}><Sparkles size={17} />构造提示词</button>
+      </section>
+
+      {prompt && <section className="ai-step"><div className="ai-step-title"><span>2</span><strong>交给外部大模型</strong></div>
+        <textarea className="prompt-output" aria-label="生成的提示词" rows={12} value={prompt} readOnly />
+        <div className="inline-actions"><button className="secondary-button" onClick={() => copy(prompt)}><Clipboard size={16} />复制提示词</button><button className="secondary-button" onClick={() => downloadText(prompt, mode === 'snapshot' ? 'sixplan-new-plan-prompt.txt' : 'sixplan-extend-plan-prompt.txt')}><Download size={16} />下载 TXT</button></div>
+      </section>}
+
+      <section className="ai-step"><div className="ai-step-title"><span>{prompt ? '3' : '2'}</span><strong>校验模型返回</strong></div>
+        <label>粘贴 JSON<textarea rows={7} value={raw} onChange={(event) => setRaw(event.target.value)} placeholder="粘贴模型返回的 JSON；也可以直接上传 .json 文件" /></label>
+        <div className="inline-actions"><button className="secondary-button" disabled={busy || !raw.trim()} onClick={() => validate(raw)}><FileJson size={16} />校验并预览</button><input ref={fileInput} type="file" accept=".json,.plan.json" hidden onChange={(event) => upload(event.target.files?.[0])} /><button className="secondary-button" disabled={busy || (mode === 'changeset' && !planId)} onClick={() => fileInput.current?.click()}><Upload size={16} />上传 JSON</button></div>
+        {repairPrompt && <div className="repair-box"><strong>可生成修复提示词</strong><textarea rows={8} value={repairPrompt} readOnly /><button className="secondary-button" onClick={() => copy(repairPrompt)}><RefreshCw size={16} />复制修复提示词</button></div>}
+      </section>
+
+      {preview && <section className="ai-step preview-step"><div className="ai-step-title"><span><Check size={14} /></span><strong>确认预览</strong></div>
+        <div className="preview-stats"><div><strong>{preview.nodeCount}</strong><span>最终节点</span></div><div><strong>{preview.edgeCount}</strong><span>最终连接</span></div><div><strong>+{preview.addNodeCount}</strong><span>新增节点</span></div><div className={preview.removeNodeCount ? 'danger-stat' : ''}><strong>-{preview.removeNodeCount}</strong><span>删除节点</span></div></div>
+        {preview.revisionChanged && <div className="notice warning">JSON 的基础版本为 {preview.baseRevision}，当前图版本已变化。系统已在最新图上重新校验，应用前会再次确认。</div>}
+        <div className="preview-list">{preview.previewNodes.map((node) => <div className={`preview-row change-${node.change}`} key={`${node.change}-${node.key}`}><span>{node.change === 'add' ? '+' : node.change === 'remove' ? '-' : '~'}</span><strong>{node.title}</strong><code>{node.key}</code></div>)}</div>
+        {preview.kind === 'snapshot' && <div className="area-decision"><label>目标方式<select value={areaMode} onChange={(event) => setAreaMode(event.target.value as 'existing' | 'create')}><option value="existing">选择已有领域</option><option value="create">创建新领域</option></select></label>{areaMode === 'existing' ? <label>目标领域<select value={targetAreaId} onChange={(event) => setTargetAreaId(event.target.value)}>{areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}</select></label> : <label>新领域名称<input value={createAreaName} onChange={(event) => setCreateAreaName(event.target.value)} /></label>}</div>}
+        <button className={preview.removeNodeCount + preview.removeEdgeCount > 0 ? 'danger-button' : 'primary-button'} disabled={busy} onClick={() => apply(preview.revisionChanged ? preview.currentRevision : undefined)}>{busy ? '正在应用' : preview.kind === 'snapshot' ? '创建新计划' : '应用增量变更'}</button>
+      </section>}
+    </div>
+  </Modal>;
+}

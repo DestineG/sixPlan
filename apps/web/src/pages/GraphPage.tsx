@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow, type Connection, type Edge, type Node, type NodeTypes } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
-import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, CalendarDays, Download, Plus, Trash2 } from 'lucide-react';
+import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, CalendarDays, Copy, Download, Plus, Trash2 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { nodeStatusLabels, type EdgeDto, type GraphDto, type NodeDto } from '@sixplan/shared';
@@ -66,7 +66,8 @@ function GraphWorkspace() {
     {readOnly && <div className="readonly-strip">{graph.plan.archivedAt ? '归档计划为只读状态。恢复后才能继续编辑。' : '移动端提供只读查看，请在桌面浏览器中编辑计划图。'}</div>}
     <div className="graph-body"><section className="graph-canvas"><ReactFlow<FlowNode, FlowEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
       onConnect={connect} onNodeDragStop={(_, node) => savePosition(node)} onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }} onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}
-      onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }} nodesDraggable={!readOnly} nodesConnectable={!readOnly} deleteKeyCode={null} fitView minZoom={0.2} maxZoom={1.8}>
+      onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }} nodesDraggable={!readOnly} nodesConnectable={!readOnly} deleteKeyCode={null}
+      onlyRenderVisibleElements={nodes.length > 500} fitView minZoom={0.2} maxZoom={1.8}>
       <Background gap={22} size={1} color="#d8dee2" /><MiniMap pannable zoomable nodeStrokeWidth={3} /><Controls showInteractive={false} /></ReactFlow></section>
       <aside className={`node-panel ${selectedNode ? 'open' : ''}`}>{selectedNode ? <NodeDetail key={selectedNode.id} node={selectedNode} readOnly={readOnly} onUpdated={updateNode} onMarkdown={() => setMarkdownNode(selectedNode)} /> : <div className="panel-empty"><BookOpenText size={24} /><p>选择一个节点查看详情</p></div>}</aside></div>
     {markdownNode && <Suspense fallback={<div className="modal-loader"><span className="spinner" />加载编辑器</div>}><MarkdownModal node={markdownNode} readOnly={readOnly} onClose={() => setMarkdownNode(null)} onSaved={updateNode} /></Suspense>}
@@ -81,7 +82,7 @@ function NodeDetail({ node, readOnly, onUpdated, onMarkdown }: { node: NodeDto; 
   function setDatesToToday() { const today = localToday(); dirty.current = true; setForm((current) => ({ ...current, startDate: today, endDate: today })); }
   function extendEndDate(amount: number, unit: DateIncrementUnit) { if (!form.endDate) return; dirty.current = true; setForm((current) => ({ ...current, endDate: addToDateOnly(current.endDate, amount, unit) })); }
   return <div className="node-detail"><div className="panel-heading"><div><span>节点详情</span><small className={`save-state ${saveState}`}>{saveState === 'saving' ? '保存中' : saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : ''}</small></div></div>
-    <div className="panel-form"><label>名称<input value={form.title} onChange={change('title')} disabled={readOnly} /></label><label>状态<select value={form.status} onChange={change('status')} disabled={readOnly}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+    <div className="panel-form"><label>节点 key<div className="key-copy-row"><code>{node.key}</code><button className="icon-button" title="复制节点 key" onClick={() => navigator.clipboard.writeText(node.key).then(() => toast.success('节点 key 已复制'))}><Copy size={15} /></button></div></label><label>名称<input value={form.title} onChange={change('title')} disabled={readOnly} /></label><label>状态<select value={form.status} onChange={change('status')} disabled={readOnly}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <div className="date-fields"><label>开始日期<input type="date" value={form.startDate} onChange={change('startDate')} disabled={readOnly} /></label><label>结束日期<input type="date" value={form.endDate} onChange={change('endDate')} disabled={readOnly} /></label></div>
       {!readOnly && <div className="date-shortcuts"><button className="secondary-button today-shortcut" onClick={setDatesToToday}><CalendarDays size={16} />设置起止日期为今天</button><div className="duration-shortcuts">
         <button className="secondary-button" disabled={!form.endDate} onClick={() => extendEndDate(1, 'day')}>+1天</button>

@@ -121,10 +121,10 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const now = new Date().toISOString();
     const row: PlanRow = { id: randomUUID(), area_id: area.id, area_name: area.name, user_id: area.user_id,
       name: body.name, description: body.description, status: body.status, archived_at: null, version: 1,
-      created_at: now, updated_at: now, node_count: 0 };
+      graph_revision: 1, created_at: now, updated_at: now, node_count: 0 };
     app.database.sqlite.prepare(`INSERT INTO plans
-      (id,area_id,name,description,status,archived_at,version,created_at,updated_at)
-      VALUES (@id,@area_id,@name,@description,@status,@archived_at,@version,@created_at,@updated_at)`).run(row);
+      (id,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
+      VALUES (@id,@area_id,@name,@description,@status,@archived_at,@version,@graph_revision,@created_at,@updated_at)`).run(row);
     reply.code(201);
     return { plan: mapPlan(row) };
   });
@@ -196,12 +196,16 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const body = z.object({ title: z.string().trim().min(1).max(200).default('新节点'), positionX: z.number().finite(), positionY: z.number().finite() }).parse(request.body);
     const plan = getPlan(app, request.currentUser!.id, planId); ensureEditable(plan);
     const now = new Date().toISOString();
-    const row: NodeRow = { id: randomUUID(), plan_id: planId, title: body.title, status: 'not_started', start_date: null,
+    const id = randomUUID();
+    const row: NodeRow = { id, plan_id: planId, node_key: `node-${id.replaceAll('-', '').slice(0, 12)}`, title: body.title, status: 'not_started', start_date: null,
       end_date: null, summary: '', extra_content: '', position_x: body.positionX, position_y: body.positionY,
       version: 1, created_at: now, updated_at: now };
-    app.database.sqlite.prepare(`INSERT INTO nodes
-      (id,plan_id,title,status,start_date,end_date,summary,extra_content,position_x,position_y,version,created_at,updated_at)
-      VALUES (@id,@plan_id,@title,@status,@start_date,@end_date,@summary,@extra_content,@position_x,@position_y,@version,@created_at,@updated_at)`).run(row);
+    app.database.sqlite.transaction(() => {
+      app.database.sqlite.prepare(`INSERT INTO nodes
+        (id,plan_id,node_key,title,status,start_date,end_date,summary,extra_content,position_x,position_y,version,created_at,updated_at)
+        VALUES (@id,@plan_id,@node_key,@title,@status,@start_date,@end_date,@summary,@extra_content,@position_x,@position_y,@version,@created_at,@updated_at)`).run(row);
+      app.database.sqlite.prepare('UPDATE plans SET graph_revision = graph_revision + 1 WHERE id = ?').run(planId);
+    })();
     reply.code(201); return { node: mapNode(row) };
   });
 
@@ -224,7 +228,10 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const { nodeId } = nodeParams.parse(request.params);
     const body = z.object({ expectedVersion: z.number().int().positive() }).parse(request.body);
     const node = getNode(app, request.currentUser!.id, nodeId); ensureEditable(node); ensureVersion(node.version, body.expectedVersion);
-    app.database.sqlite.transaction(() => app.database.sqlite.prepare('DELETE FROM nodes WHERE id = ?').run(nodeId))();
+    app.database.sqlite.transaction(() => {
+      app.database.sqlite.prepare('DELETE FROM nodes WHERE id = ?').run(nodeId);
+      app.database.sqlite.prepare('UPDATE plans SET graph_revision = graph_revision + 1 WHERE id = ?').run(node.plan_id);
+    })();
     return { success: true };
   });
 
@@ -261,9 +268,12 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const now = new Date().toISOString();
     const row: EdgeRow = { id: randomUUID(), plan_id: planId, source_node_id: body.sourceNodeId,
       target_node_id: body.targetNodeId, version: 1, created_at: now, updated_at: now };
-    app.database.sqlite.prepare(`INSERT INTO edges
-      (id,plan_id,source_node_id,target_node_id,version,created_at,updated_at)
-      VALUES (@id,@plan_id,@source_node_id,@target_node_id,@version,@created_at,@updated_at)`).run(row);
+    app.database.sqlite.transaction(() => {
+      app.database.sqlite.prepare(`INSERT INTO edges
+        (id,plan_id,source_node_id,target_node_id,version,created_at,updated_at)
+        VALUES (@id,@plan_id,@source_node_id,@target_node_id,@version,@created_at,@updated_at)`).run(row);
+      app.database.sqlite.prepare('UPDATE plans SET graph_revision = graph_revision + 1 WHERE id = ?').run(planId);
+    })();
     reply.code(201); return { edge: mapEdge(row) };
   });
 
@@ -274,7 +284,10 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
       JOIN areas a ON a.id = p.area_id WHERE e.id = ? AND a.user_id = ?`).get(edgeId, request.currentUser!.id) as EdgeRow | undefined;
     if (!edge) throw new AppError(404, 'NOT_FOUND', '连接不存在');
     const plan = getPlan(app, request.currentUser!.id, edge.plan_id); ensureEditable(plan); ensureVersion(edge.version, body.expectedVersion);
-    app.database.sqlite.prepare('DELETE FROM edges WHERE id = ?').run(edgeId);
+    app.database.sqlite.transaction(() => {
+      app.database.sqlite.prepare('DELETE FROM edges WHERE id = ?').run(edgeId);
+      app.database.sqlite.prepare('UPDATE plans SET graph_revision = graph_revision + 1 WHERE id = ?').run(edge.plan_id);
+    })();
     return { success: true };
   });
 }

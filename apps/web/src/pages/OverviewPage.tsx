@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Archive, ArrowDown, ArrowUp, Download, FileInput, FileUp, Folder, FolderInput, FolderPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { Activity, Archive, ArrowDown, ArrowUp, Bot, Download, FileInput, FileUp, Folder, FolderInput, FolderPlus, ListPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { planStatusLabels, type AreaDto, type ImportResult, type PlanDto, type PlanStatus } from '@sixplan/shared';
+import { planStatusLabels, type AreaDto, type ImportPreviewDto, type PlanDto, type PlanStatus } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile } from '../api';
 import { ConfirmDialog, Modal } from '../components/Dialogs';
+import { AiPlanModal } from '../components/AiPlanModal';
 
 type Selection = 'active' | 'all' | 'archived' | string;
 
@@ -20,7 +21,7 @@ export function OverviewPage() {
   const [areaModal, setAreaModal] = useState<{ open: boolean; area?: AreaDto }>({ open: false });
   const [planModal, setPlanModal] = useState<{ open: boolean; plan?: PlanDto }>({ open: false });
   const [movePlan, setMovePlan] = useState<PlanDto | null>(null); const [confirm, setConfirm] = useState<{ plan: PlanDto; kind: 'archive' | 'delete' } | null>(null);
-  const [importMode, setImportMode] = useState<'plan' | 'area' | null>(null);
+  const [importMode, setImportMode] = useState<'plan' | 'area' | 'ai-new' | 'ai-extend' | null>(null);
   const areasQuery = useQuery({ queryKey: ['areas'], queryFn: () => api<{ areas: AreaDto[] }>('/api/areas') });
   const plansQuery = useQuery({ queryKey: ['plans', selection], queryFn: () => selection === 'archived'
     ? api<{ plans: PlanDto[] }>('/api/plans/archived')
@@ -75,6 +76,8 @@ export function OverviewPage() {
         <div className="heading-actions"><DropdownMenu.Root><DropdownMenu.Trigger asChild><button className="secondary-button"><FileUp size={17} />导入</button></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="end">
           <DropdownMenu.Item onSelect={() => setImportMode('plan')}><FileInput size={15} />导入计划</DropdownMenu.Item>
           <DropdownMenu.Item onSelect={() => setImportMode('area')}><FolderInput size={15} />导入领域</DropdownMenu.Item>
+          <DropdownMenu.Item onSelect={() => setImportMode('ai-new')}><Bot size={15} />AI 生成新计划</DropdownMenu.Item>
+          <DropdownMenu.Item onSelect={() => setImportMode('ai-extend')}><ListPlus size={15} />AI 扩展现有计划</DropdownMenu.Item>
         </DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root>
           {selection !== 'archived' && <button className="primary-button" disabled={areas.length === 0} onClick={() => setPlanModal({ open: true })}><Plus size={17} />新建计划</button>}</div></div>
       {areas.length === 0 ? <EmptyState icon={<FolderPlus size={28} />} title="先创建一个领域" body="领域用于组织工作、学习和生活中的不同计划。" action={() => setAreaModal({ open: true })} actionLabel="新建领域" />
@@ -88,6 +91,8 @@ export function OverviewPage() {
     <MovePlanModal plan={movePlan} areas={areas} onClose={() => setMovePlan(null)} onSaved={refresh} />
     <ImportPlansModal open={importMode === 'plan'} areas={areas} existingPlans={plans} onClose={() => setImportMode(null)} onImported={refresh} />
     <ImportAreaModal open={importMode === 'area'} areas={areas} onClose={() => setImportMode(null)} onImported={refresh} />
+    <AiPlanModal mode={importMode === 'ai-new' ? 'snapshot' : importMode === 'ai-extend' ? 'changeset' : null} areas={areas}
+      onClose={() => setImportMode(null)} onApplied={async (plan) => { await refresh(); if (importMode === 'ai-extend') navigate(`/plans/${plan.id}`); }} />
     <ConfirmDialog open={Boolean(confirm)} onOpenChange={(open) => !open && setConfirm(null)} title={confirm?.kind === 'archive' ? '归档计划' : '永久删除计划'}
       description={confirm?.kind === 'archive' ? `“${confirm?.plan.name}”归档后将变为只读并移入已归档视图。` : `“${confirm?.plan.name}”及其全部节点和连接将永久删除，此操作无法撤销。`}
       confirmLabel={confirm?.kind === 'archive' ? '确认归档' : '永久删除'} danger={confirm?.kind === 'delete'} onConfirm={async () => { if (!confirm) return;
@@ -134,26 +139,40 @@ function MovePlanModal({ plan, areas, onClose, onSaved }: { plan: PlanDto | null
   return <Modal open={Boolean(plan)} onOpenChange={(open) => { if (!open) onClose(); }} title="移动计划"><form className="stack-form" onSubmit={async (e) => { e.preventDefault(); if (!plan) return; try { await api(`/api/plans/${plan.id}/move`, { method: 'POST', body: JSON.stringify({ areaId, expectedVersion: plan.version }) }); await onSaved(); onClose(); toast.success('计划已移动'); } catch (error) { showError(error); } }}><label>目标领域<select value={areaId} onChange={(e) => setAreaId(e.target.value)}>{areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}</select></label><div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!areaId || areaId === plan?.areaId}>移动</button></div></form></Modal>;
 }
 
-interface ImportItem { fileName: string; content: unknown; areaName: string; planName: string; targetAreaId: string; createAreaName: string; }
+interface ImportItem { fileName: string; sessionId: string; areaName: string; planName: string; targetAreaId: string; createAreaName: string; error?: string; }
 function ImportPlansModal({ open, areas, existingPlans, onClose, onImported }: { open: boolean; areas: AreaDto[]; existingPlans: PlanDto[]; onClose: () => void; onImported: () => Promise<void> }) {
   const input = useRef<HTMLInputElement>(null); const [items, setItems] = useState<ImportItem[]>([]); const [busy, setBusy] = useState(false); const [defaultArea, setDefaultArea] = useState('');
-  async function choose(files: FileList | null) { if (!files) return; const parsed: ImportItem[] = [];
-    for (const file of Array.from(files)) { try { const content = JSON.parse(await file.text()) as { areaName?: string; plan?: { name?: string } }; const match = areas.find((area) => area.name.toLocaleLowerCase() === (content.areaName ?? '').toLocaleLowerCase()); parsed.push({ fileName: file.name, content, areaName: content.areaName ?? '', planName: content.plan?.name ?? file.name, targetAreaId: match?.id ?? '', createAreaName: match ? '' : (content.areaName ?? '') }); } catch { toast.error(`${file.name} 不是有效 JSON`); } }
-    setItems(parsed);
+  async function discard(entries = items) { await Promise.all(entries.filter((item) => item.sessionId).map((item) => api(`/api/import-sessions/${item.sessionId}`, { method: 'DELETE' }).catch(() => undefined))); }
+  async function close() { await discard(); setItems([]); setDefaultArea(''); onClose(); }
+  async function choose(files: FileList | null) { if (!files) return; setBusy(true); await discard(); const parsed: ImportItem[] = [];
+    for (const file of Array.from(files)) {
+      try {
+        const form = new FormData(); form.append('file', file);
+        const { preview } = await api<{ preview: ImportPreviewDto }>('/api/import-sessions/upload', { method: 'POST', body: form });
+        const areaName = preview.suggestedAreaName ?? ''; const match = areas.find((area) => area.name.toLocaleLowerCase() === areaName.toLocaleLowerCase());
+        parsed.push({ fileName: file.name, sessionId: preview.sessionId, areaName, planName: preview.planName, targetAreaId: match?.id ?? '', createAreaName: match ? '' : areaName });
+      } catch (error) {
+        const message = error instanceof ApiClientError ? error.message : '文件校验失败'; parsed.push({ fileName: file.name, sessionId: '', areaName: '', planName: file.name, targetAreaId: '', createAreaName: '', error: message });
+      }
+    }
+    setItems(parsed); setBusy(false); if (input.current) input.current.value = '';
   }
-  function applyDefault() { if (!defaultArea) return; setItems((current) => current.map((item) => ({ ...item, targetAreaId: defaultArea, createAreaName: '' }))); }
-  async function submit() { if (items.some((item) => !item.targetAreaId && !item.createAreaName)) return toast.error('请为每个文件选择或创建目标领域');
-    const duplicates = items.filter((item) => existingPlans.some((plan) => plan.areaId === item.targetAreaId && plan.name === item.planName));
+  function applyDefault() { if (!defaultArea) return; setItems((current) => current.map((item) => item.error ? item : ({ ...item, targetAreaId: defaultArea, createAreaName: '' }))); }
+  async function submit() { const ready = items.filter((item) => !item.error); if (ready.some((item) => !item.targetAreaId && !item.createAreaName)) return toast.error('请为每个有效文件选择或创建目标领域');
+    const duplicates = ready.filter((item) => existingPlans.some((plan) => plan.areaId === item.targetAreaId && plan.name === item.planName));
     if (duplicates.length > 0 && !window.confirm(`有 ${duplicates.length} 个同名计划，将作为独立副本导入。是否继续？`)) return;
-    setBusy(true); try { const { results } = await api<{ results: ImportResult[] }>('/api/plan-imports', { method: 'POST', body: JSON.stringify({ files: items }) });
-      const failed = results.filter((result) => !result.success); toast[failed.length ? 'warning' : 'success'](`导入完成：${results.length - failed.length} 成功，${failed.length} 失败`);
-      if (failed.length) failed.forEach((result) => toast.error(`${result.fileName}：${result.message}`)); await onImported(); if (!failed.length) onClose();
-    } catch (error) { showError(error); } finally { setBusy(false); }
+    setBusy(true); let success = 0; const next = [...items];
+    for (let index = 0; index < next.length; index += 1) {
+      const item = next[index]!; if (item.error) continue;
+      try { await api(`/api/import-sessions/${item.sessionId}/apply`, { method: 'POST', body: JSON.stringify(item.targetAreaId ? { targetAreaId: item.targetAreaId } : { createAreaName: item.createAreaName }) }); success += 1; next[index] = { ...item, sessionId: '', error: '已导入' }; }
+      catch (error) { next[index] = { ...item, error: error instanceof ApiClientError ? error.message : '导入失败' }; }
+    }
+    const failed = next.length - success; setItems(next); toast[failed ? 'warning' : 'success'](`导入完成：${success} 成功，${failed} 失败`); await onImported(); setBusy(false); if (!failed) { setItems([]); onClose(); }
   }
-  return <Modal open={open} onOpenChange={(value) => { if (!value) { setItems([]); setDefaultArea(''); onClose(); } }} title="导入计划" description="支持一次选择多个 .plan.json 文件，每个文件独立处理。" wide>
+  return <Modal open={open} onOpenChange={(value) => { if (!value) void close(); }} title="导入计划" description="支持一次选择多个 v2 .plan.json 文件，每个文件流式校验并独立处理。" wide>
     <div className="import-toolbar"><input ref={input} type="file" accept=".json,.plan.json" multiple hidden onChange={(e) => choose(e.target.files)} /><button className="secondary-button" onClick={() => input.current?.click()}><FileUp size={17} />选择文件</button>{items.length > 1 && <><select value={defaultArea} onChange={(e) => setDefaultArea(e.target.value)}><option value="">本批默认领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select><button className="secondary-button" onClick={applyDefault}>应用到全部</button></>}</div>
-    <div className="import-list">{items.length === 0 ? <div className="empty-inline">尚未选择文件</div> : items.map((item, index) => <div className="import-row" key={`${item.fileName}-${index}`}><div><strong>{item.planName}</strong><small>{item.fileName}{item.areaName ? ` · 文件领域：${item.areaName}` : ''}</small></div><select value={item.targetAreaId} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, targetAreaId: e.target.value, createAreaName: '' } : entry))}><option value="">创建文件中的领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select>{!item.targetAreaId && <input aria-label="新领域名称" placeholder="新领域名称" value={item.createAreaName} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, createAreaName: e.target.value } : entry))} />}</div>)}</div>
-    <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy || items.length === 0} onClick={submit}>{busy ? '正在导入' : `导入 ${items.length || ''} 个计划`}</button></div>
+    <div className="import-list">{items.length === 0 ? <div className="empty-inline">尚未选择文件</div> : items.map((item, index) => <div className={`import-row ${item.error ? 'import-row-error' : ''}`} key={`${item.fileName}-${index}`}><div><strong>{item.planName}</strong><small>{item.fileName}{item.areaName ? ` · 文件领域：${item.areaName}` : ''}{item.error ? ` · ${item.error}` : ''}</small></div>{!item.error && <><select value={item.targetAreaId} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, targetAreaId: e.target.value, createAreaName: '' } : entry))}><option value="">创建文件中的领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select>{!item.targetAreaId && <input aria-label="新领域名称" placeholder="新领域名称" value={item.createAreaName} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, createAreaName: e.target.value } : entry))} />}</>}</div>)}</div>
+    <div className="dialog-actions"><button className="secondary-button" onClick={() => void close()}>取消</button><button className="primary-button" disabled={busy || items.every((item) => Boolean(item.error))} onClick={submit}>{busy ? '正在处理' : `导入 ${items.filter((item) => !item.error).length || ''} 个计划`}</button></div>
   </Modal>;
 }
 

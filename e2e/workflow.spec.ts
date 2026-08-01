@@ -110,3 +110,52 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await expect(page.getByText('跨领域汇总 2 个进行中的计划')).toBeVisible();
   await page.screenshot({ path: 'test-results/mobile-active-plans.png', fullPage: true });
 });
+
+test('AI 提示词、快照和增量 JSON 工作流', async ({ page }) => {
+  const username = `ai_user_${Date.now()}`;
+  await page.goto('/register');
+  await page.getByLabel('用户名').fill(username);
+  await page.getByLabel('密码', { exact: true }).fill('password123');
+  await page.getByLabel('确认密码').fill('password123');
+  await page.getByRole('button', { name: '创建账号' }).click();
+
+  await page.getByRole('button', { name: '导入', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'AI 生成新计划' }).click();
+  await page.getByLabel('你的想法').fill('创建一个包含基础阶段和进阶阶段的训练计划');
+  await page.getByText('高级选项').click();
+  await page.getByLabel('建议领域').fill('AI 训练');
+  await page.getByRole('button', { name: '构造提示词' }).click();
+  await expect(page.getByLabel('生成的提示词')).toContainText('sixplan-plan-snapshot');
+  const snapshot = {
+    format: 'sixplan-plan-snapshot', version: 2, areaName: 'AI 训练',
+    plan: { name: 'AI 长期训练', description: '由外部模型生成', status: 'active' },
+    nodes: [{ key: 'base-stage', title: '基础阶段' }], edges: []
+  };
+  await page.getByLabel('粘贴 JSON').fill(JSON.stringify(snapshot));
+  await page.getByRole('button', { name: '校验并预览' }).click();
+  await expect(page.getByText('确认预览')).toBeVisible();
+  await expect(page.getByText('最终节点')).toBeVisible();
+  await expect(page.getByLabel('新领域名称')).toHaveValue('AI 训练');
+  await page.locator('.preview-step').screenshot({ path: 'test-results/desktop-ai-snapshot-preview.png' });
+  await page.getByRole('button', { name: '创建新计划' }).click();
+  await expect(page.getByRole('button', { name: /AI 长期训练/ })).toBeVisible();
+
+  await page.getByRole('button', { name: '导入', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'AI 扩展现有计划' }).click();
+  await expect(page.getByLabel('目标计划')).toHaveValue(/.+/);
+  await page.getByLabel('你的想法').fill('在基础阶段后增加进阶阶段');
+  await page.getByRole('button', { name: '构造提示词' }).click();
+  await expect(page.getByLabel('生成的提示词')).toContainText('sixplan-plan-changeset');
+  const changeset = {
+    format: 'sixplan-plan-changeset', version: 2, targetPlanName: 'AI 长期训练', baseRevision: 1,
+    operations: { addNodes: [{ key: 'advanced-stage', title: '进阶阶段' }], addEdges: [{ source: 'base-stage', target: 'advanced-stage' }] }
+  };
+  await page.getByLabel('粘贴 JSON').fill(JSON.stringify(changeset));
+  await page.getByRole('button', { name: '校验并预览' }).click();
+  await expect(page.getByText('确认预览')).toBeVisible();
+  await expect(page.getByText('进阶阶段', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '应用增量变更' }).click();
+  await expect(page.getByRole('heading', { name: 'AI 长期训练' })).toBeVisible();
+  await expect(page.locator('.graph-node')).toHaveCount(2);
+  await expect(page.locator('.react-flow__edge')).toHaveCount(1);
+});

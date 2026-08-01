@@ -2,6 +2,16 @@
 
 sixPlan 是一个支持多用户的个人 DAG 计划管理工具。桌面端可完整编辑领域、计划、节点、依赖关系和 Markdown，移动端提供只读浏览。
 
+## AI 辅助计划 JSON
+
+总览页“导入”菜单提供“AI 生成新计划”和“AI 扩展现有计划”。sixPlan 不内置模型，也不保存模型 API Key：用户描述目标后，应用生成只读提示词，用户可复制或下载到任意外部大模型，再把模型返回的 JSON 粘贴或上传回来校验、预览并确认写入。
+
+- `sixplan-plan-snapshot` v2 始终创建新计划，不覆盖原数据。
+- `sixplan-plan-changeset` v2 按稳定节点 `key` 增量新增、更新或删除节点和连接。
+- 上传文件先流式写入临时目录，节点和连接逐项解析；临时会话默认 24 小时后清理。
+- 所有写入在事务中再次检查日期、引用、重复边、环和图版本；删除操作使用红色预览并再次确认。
+- v1 文件不再兼容。节点 `key` 是计划内唯一且不可变的外部引用，内部数据库 ID 仍使用 UUID。
+
 ## 环境要求
 
 - Node.js 20
@@ -73,6 +83,15 @@ npm run admin -- promote username
 | `SIXPLAN_TRUST_PROXY` | 无 | 允许提供代理协议头的固定代理 IP 或 CIDR |
 | `SIXPLAN_ALLOW_OPEN_DATA_DIR` | `true` | Docker 或公网部署时设为 `false` |
 | `SIXPLAN_ADMIN_PASSWORD` | 无 | 创建管理员时使用的初始密码 |
+| `SIXPLAN_IMPORT_MAX_FILE_BYTES` | `536870912` | 单个计划 JSON 的服务端硬上限（512 MB） |
+| `SIXPLAN_IMPORT_MAX_NODES` | `50000` | 单次导入节点硬上限 |
+| `SIXPLAN_IMPORT_MAX_EDGES` | `250000` | 单次导入连接硬上限 |
+| `SIXPLAN_IMPORT_MAX_MARKDOWN_BYTES` | `5242880` | 单节点 Markdown 硬上限（5 MB） |
+| `SIXPLAN_IMPORT_MAX_TEMP_BYTES` | `2147483648` | 每用户临时导入空间硬上限（2 GB） |
+| `SIXPLAN_IMPORT_MAX_CONCURRENT_USER` | `2` | 每用户并发导入任务上限 |
+| `SIXPLAN_IMPORT_MAX_CONCURRENT_GLOBAL` | `8` | 全站并发导入任务上限 |
+| `SIXPLAN_IMPORT_TASK_TIMEOUT_MS` | `1800000` | 单个导入任务超时（30 分钟） |
+| `SIXPLAN_IMPORT_SESSION_HOURS` | `24` | 临时导入会话最长保留小时数 |
 | `NODE_ENV` | 无 | 生产启动时设为 `production` |
 
 默认数据目录：

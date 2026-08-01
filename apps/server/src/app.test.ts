@@ -110,6 +110,97 @@ describe('sixPlan API', () => {
     expect(results[0]!.plan!.createdAt).toBe(plan.createdAt);
   });
 
+  it('uses strict v2 snapshots, stable node keys and automatic layout', async () => {
+    const cookie = await register('snapshot-v2');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '训练' })).json<{ area: AreaDto }>().area;
+    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '原计划' })).json<{ plan: PlanDto }>().plan;
+    const manual = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '手工节点', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    expect(manual.key).toMatch(/^node-[a-z0-9-]+$/);
+    const exported = (await request(cookie, 'GET', `/api/plans/${plan.id}/export`)).json<Record<string, unknown>>();
+    expect(exported).toMatchObject({ format: 'sixplan-plan-snapshot', version: 2 });
+
+    const oldVersion = await request(cookie, 'POST', '/api/import-sessions/json', { content: { ...exported, version: 1 } });
+    expect(oldVersion.statusCode).toBe(400); expect(oldVersion.json()).toMatchObject({ code: 'UNSUPPORTED_FILE_VERSION' });
+    const unknownField = await request(cookie, 'POST', '/api/import-sessions/json', { content: { ...exported, typoField: true } });
+    expect(unknownField.statusCode).toBe(400); expect(unknownField.json()).toMatchObject({ code: 'UNKNOWN_FIELD' });
+
+    const snapshot = {
+      format: 'sixplan-plan-snapshot', version: 2, areaName: '训练', plan: { name: 'AI 长跑计划' },
+      nodes: [{ key: 'base-training', title: '基础训练' }, { key: 'race-week', title: '比赛周' }],
+      edges: [{ source: 'base-training', target: 'race-week' }]
+    };
+    const createdSession = await request(cookie, 'POST', '/api/import-sessions/json', { content: snapshot });
+    expect(createdSession.statusCode).toBe(200);
+    const preview = createdSession.json<{ preview: { sessionId: string; needsLayout: boolean } }>().preview;
+    expect(preview.needsLayout).toBe(true);
+    const applied = await request(cookie, 'POST', `/api/import-sessions/${preview.sessionId}/apply`, { targetAreaId: area.id });
+    expect(applied.statusCode).toBe(201); const imported = applied.json<{ plan: PlanDto }>().plan;
+    const graph = (await request(cookie, 'GET', `/api/plans/${imported.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(graph.nodes.map((node) => node.key)).toEqual(['base-training', 'race-week']);
+    expect(graph.nodes[1]!.positionX).toBeGreaterThan(graph.nodes[0]!.positionX);
+  });
+
+  it('previews and transactionally applies changesets with revision reconfirmation', async () => {
+    const cookie = await register('changeset-user');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '长期计划' })).json<{ area: AreaDto }>().area;
+    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '锻炼', status: 'active' })).json<{ plan: PlanDto }>().plan;
+    const first = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '第一阶段', positionX: 100, positionY: 100 })).json<{ node: NodeDto }>().node;
+    const second = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '第二阶段', positionX: 400, positionY: 100 })).json<{ node: NodeDto }>().node;
+    await request(cookie, 'POST', `/api/plans/${plan.id}/edges`, { sourceNodeId: first.id, targetNodeId: second.id });
+    const current = (await request(cookie, 'GET', `/api/plans/${plan.id}`)).json<{ plan: PlanDto }>().plan;
+    const changeset = { format: 'sixplan-plan-changeset', version: 2, targetPlanName: '锻炼', baseRevision: current.graphRevision,
+      operations: { addNodes: [{ key: 'recovery-stage', title: '恢复阶段' }], updateNodes: [{ key: first.key, changes: { status: 'completed' } }],
+        addEdges: [{ source: second.key, target: 'recovery-stage' }] } };
+    const sessionResponse = await request(cookie, 'POST', '/api/import-sessions/json', { content: changeset, targetPlanId: plan.id });
+    expect(sessionResponse.statusCode).toBe(200);
+    const preview = sessionResponse.json<{ preview: { sessionId: string; addNodeCount: number } }>().preview;
+    expect(preview.addNodeCount).toBe(1);
+
+    await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '并发添加', positionX: 100, positionY: 300 });
+    const staleApply = await request(cookie, 'POST', `/api/import-sessions/${preview.sessionId}/apply`, {});
+    expect(staleApply.statusCode).toBe(409); const staleError = staleApply.json<{ code: string; details: { currentRevision: number } }>();
+    expect(staleError.code).toBe('REVISION_RECONFIRM_REQUIRED');
+    const applied = await request(cookie, 'POST', `/api/import-sessions/${preview.sessionId}/apply`, { confirmedRevision: staleError.details.currentRevision });
+    expect(applied.statusCode).toBe(200);
+    const graph = (await request(cookie, 'GET', `/api/plans/${plan.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(graph.nodes.find((node) => node.key === first.key)?.status).toBe('completed');
+    expect(graph.nodes.find((node) => node.key === 'recovery-stage')?.positionX).toBeGreaterThan(second.positionX);
+
+    const cycle = { format: 'sixplan-plan-changeset', version: 2, baseRevision: graph.plan.graphRevision,
+      operations: { addEdges: [{ source: 'recovery-stage', target: first.key }] } };
+    const rejected = await request(cookie, 'POST', '/api/import-sessions/json', { content: cycle, targetPlanId: plan.id });
+    expect(rejected.statusCode).toBe(400); expect(rejected.json()).toMatchObject({ code: 'CYCLE_DETECTED' });
+  });
+
+  it('enforces per-user import limits and isolates temporary sessions', async () => {
+    const alice = await register('limit-alice'); const bob = await register('limit-bob');
+    const area = (await request(alice, 'POST', '/api/areas', { name: '导入区' })).json<{ area: AreaDto }>().area;
+    const settingsResponse = await request(alice, 'GET', '/api/import-settings');
+    const settings = settingsResponse.json<{ settings: { version: number } }>().settings;
+    const saved = await request(alice, 'PUT', '/api/import-settings', { maxNodes: 1, maxEdges: 0, maxMarkdownBytes: 0, maxFileBytes: 0, sessionHours: 24, expectedVersion: settings.version });
+    expect(saved.statusCode).toBe(200);
+    const tooLarge = await request(alice, 'POST', '/api/import-sessions/json', { content: { format: 'sixplan-plan-snapshot', version: 2,
+      plan: { name: '过大' }, nodes: [{ key: 'first', title: '一' }, { key: 'second', title: '二' }], edges: [] } });
+    expect(tooLarge.statusCode).toBe(413); expect(tooLarge.json()).toMatchObject({ code: 'IMPORT_NODE_LIMIT' });
+
+    const currentSettings = saved.json<{ settings: { version: number } }>().settings;
+    await request(alice, 'PUT', '/api/import-settings', { maxNodes: 0, maxEdges: 0, maxMarkdownBytes: 0, maxFileBytes: 0, sessionHours: 24, expectedVersion: currentSettings.version });
+    const valid = await request(alice, 'POST', '/api/import-sessions/json', { content: { format: 'sixplan-plan-snapshot', version: 2,
+      plan: { name: '隔离测试' }, nodes: [{ key: 'only-node', title: '唯一节点' }], edges: [] } });
+    const sessionId = valid.json<{ preview: { sessionId: string } }>().preview.sessionId;
+    expect((await request(bob, 'GET', `/api/import-sessions/${sessionId}`)).statusCode).toBe(404);
+    expect((await request(alice, 'POST', `/api/import-sessions/${sessionId}/apply`, { targetAreaId: area.id })).statusCode).toBe(201);
+
+    const boundary = 'sixplan-test-boundary';
+    const uploadJson = JSON.stringify({ format: 'sixplan-plan-snapshot', version: 2, plan: { name: '流式上传' }, nodes: [], edges: [] });
+    const multipartBody = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="stream.plan.json"\r\nContent-Type: application/json\r\n\r\n${uploadJson}\r\n--${boundary}--\r\n`);
+    const uploaded = await app.inject({ method: 'POST', url: '/api/import-sessions/upload', headers: { cookie: alice,
+      'content-type': `multipart/form-data; boundary=${boundary}` }, payload: multipartBody });
+    expect(uploaded.statusCode).toBe(200); const uploadSession = uploaded.json<{ preview: { sessionId: string; planName: string } }>().preview;
+    expect(uploadSession.planName).toBe('流式上传');
+    expect((await request(alice, 'DELETE', `/api/import-sessions/${uploadSession.sessionId}`)).statusCode).toBe(200);
+  });
+
   it('exports and atomically imports complete areas by creating or merging', async () => {
     const cookie = await register('area-importer');
     const area = (await request(cookie, 'POST', '/api/areas', { name: '工作' })).json<{ area: AreaDto }>().area;
@@ -124,7 +215,7 @@ describe('sixPlan API', () => {
     const exported = await request(cookie, 'GET', `/api/areas/${area.id}/export`);
     expect(exported.statusCode).toBe(200);
     const file = exported.json<AreaFile>();
-    expect(file).toMatchObject({ format: 'sixplan-area', version: 1, area: { name: '工作' } });
+    expect(file).toMatchObject({ format: 'sixplan-area', version: 2, area: { name: '工作' } });
     expect(file.plans.map((entry) => entry.plan.name)).toHaveLength(2);
     expect(file.plans.map((entry) => entry.plan.name)).toEqual(expect.arrayContaining(['季度规划', '日常事项']));
     expect(file.plans.find((entry) => entry.plan.name === '季度规划')?.plan.archivedAt).not.toBeNull();
@@ -149,8 +240,8 @@ describe('sixPlan API', () => {
     expect(originalActivePlans).toHaveLength(2); expect(originalArchivedPlans).toHaveLength(2);
 
     const invalidFile = structuredClone(file);
-    invalidFile.plans[0]!.edges.push({ id: 'bad-edge', sourceNodeId: invalidFile.plans[0]!.nodes[0]!.id,
-      targetNodeId: 'missing-node', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    invalidFile.plans[0]!.edges.push({ source: invalidFile.plans[0]!.nodes[0]!.key,
+      target: 'missing-node', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     const invalid = await request(cookie, 'POST', '/api/area-imports', { mode: 'create', createAreaName: '不完整领域', content: invalidFile });
     expect(invalid.statusCode).toBe(400); expect(invalid.json()).toMatchObject({ code: 'INVALID_EDGE_REFERENCE' });
     const names = (await request(cookie, 'GET', '/api/areas')).json<{ areas: AreaDto[] }>().areas.map((entry) => entry.name);

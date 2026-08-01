@@ -8,10 +8,10 @@ export interface AreaRow {
 }
 export interface PlanRow {
   id: string; area_id: string; area_name: string; user_id: string; name: string; description: string;
-  status: PlanDto['status']; archived_at: string | null; version: number; created_at: string; updated_at: string; node_count?: number;
+  status: PlanDto['status']; archived_at: string | null; version: number; graph_revision: number; created_at: string; updated_at: string; node_count?: number;
 }
 export interface NodeRow {
-  id: string; plan_id: string; title: string; status: NodeDto['status']; start_date: string | null; end_date: string | null;
+  id: string; plan_id: string; node_key: string; title: string; status: NodeDto['status']; start_date: string | null; end_date: string | null;
   summary: string; extra_content: string; position_x: number; position_y: number; version: number; created_at: string; updated_at: string;
 }
 export interface EdgeRow {
@@ -25,11 +25,11 @@ export function mapArea(row: AreaRow): AreaDto {
 }
 export function mapPlan(row: PlanRow): PlanDto {
   return { id: row.id, areaId: row.area_id, areaName: row.area_name, name: row.name, description: row.description,
-    status: row.status, archivedAt: row.archived_at, version: row.version, nodeCount: row.node_count ?? 0,
+    status: row.status, archivedAt: row.archived_at, version: row.version, graphRevision: row.graph_revision, nodeCount: row.node_count ?? 0,
     createdAt: row.created_at, updatedAt: row.updated_at };
 }
 export function mapNode(row: NodeRow): NodeDto {
-  return { id: row.id, planId: row.plan_id, title: row.title, status: row.status, startDate: row.start_date,
+  return { id: row.id, planId: row.plan_id, key: row.node_key, title: row.title, status: row.status, startDate: row.start_date,
     endDate: row.end_date, summary: row.summary, extraContent: row.extra_content, positionX: row.position_x,
     positionY: row.position_y, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at };
 }
