@@ -39,8 +39,14 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.waitForTimeout(150);
   await page.mouse.up();
   await expect(page.locator('.react-flow__edge')).toHaveCount(1);
-  await page.locator('.graph-node').first().click();
+  const selectedNodeCard = page.locator('.graph-node').first();
+  await selectedNodeCard.click();
   await page.getByLabel('名称').fill('学习推理基础');
+  await page.getByLabel('状态').selectOption('in_progress');
+  await expect(selectedNodeCard).toHaveClass(/status-border-in_progress/);
+  await expect(selectedNodeCard).toHaveCSS('border-top-color', 'rgb(59, 120, 191)');
+  await expect(selectedNodeCard.locator('.node-status')).toHaveText('进行中');
+  await expect(selectedNodeCard.locator('.node-status')).toHaveCSS('background-color', 'rgb(229, 240, 251)');
   await page.getByLabel('简短说明').fill('完成基础知识梳理');
   await page.getByRole('button', { name: '设置起止日期为今天' }).click();
   const startDate = await page.getByLabel('开始日期').inputValue();

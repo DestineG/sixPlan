@@ -170,15 +170,15 @@ input:disabled, textarea:disabled, select:disabled { color: #5f6b70; background:
 .duration-shortcuts button { min-width: 0; padding: 7px 4px; font-size: 11px; white-space: nowrap; }
 .save-state { font-size: 11px; font-weight: 550; }
 .save-state.saving { color: var(--blue); }.save-state.saved { color: #367132; }.save-state.error { color: var(--danger); }
-.graph-node { width: 240px; min-height: 116px; padding: 13px 14px; border: 1px solid #cbd3d7; border-left-width: 4px; border-radius: 7px; background: #fff; box-shadow: 0 4px 13px rgb(26 42 49 / 9%); }
-.graph-node.selected { outline: 2px solid rgb(20 125 117 / 38%); border-color: var(--brand); }
+.graph-node { width: 240px; min-height: 116px; padding: 13px 14px; border: 2px solid; border-left-width: 4px; border-radius: 7px; background: #fff; box-shadow: 0 4px 13px rgb(26 42 49 / 9%); transition: border-color 160ms ease, outline-color 160ms ease; }
+.graph-node.selected { outline: 3px solid rgb(20 125 117 / 32%); outline-offset: 2px; }
 .graph-node-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .graph-node-heading strong { font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
 .graph-node p { margin: 10px 0; color: var(--muted); font-size: 11px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .graph-node-dates { margin-top: 12px; display: flex; align-items: center; gap: 5px; color: #758188; font-size: 10px; }
 .node-status { padding: 3px 6px; }
-.node-status-not_started { background: #edf1f2; color: #607077; }.node-status-in_progress { background: #dff2ef; color: #10685f; }.node-status-completed { background: #e6f2e5; color: #33712f; }.node-status-paused { background: #fff0d7; color: #85540b; }.node-status-abandoned { background: #f4e8e9; color: #93434a; }
-.status-border-not_started { border-left-color: #93a0a6; }.status-border-in_progress { border-left-color: var(--brand); }.status-border-completed { border-left-color: #579250; }.status-border-paused { border-left-color: #d18a2b; }.status-border-abandoned { border-left-color: #b95a62; }
+.node-status-not_started { background: #edf1f2; color: #4f5f66; }.node-status-in_progress { background: #e5f0fb; color: #215b9a; }.node-status-completed { background: #e7f3e5; color: #33712f; }.node-status-paused { background: #fff0d7; color: #85540b; }.node-status-abandoned { background: #f7e7e9; color: #913d46; }
+.status-border-not_started { border-color: #7c898f; }.status-border-in_progress { border-color: #3b78bf; }.status-border-completed { border-color: #5a9553; }.status-border-paused { border-color: #ca8122; }.status-border-abandoned { border-color: #b75a62; }
 .node-handle { width: 10px !important; height: 10px !important; background: #fff !important; border: 2px solid var(--brand) !important; }
 .react-flow__controls, .react-flow__minimap { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; box-shadow: 0 4px 14px rgb(32 48 55 / 9%); }
 .react-flow__attribution { display: none; }
