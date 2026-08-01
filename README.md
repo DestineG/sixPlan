@@ -50,14 +50,14 @@ docker compose up -d --build
 
 默认访问 `http://本地服务器IP:4173`，SQLite、备份和导出文件保存在 Docker volume 中。
 
-同时启用局域网 HTTP 和经 FRP 转发的公网 IP HTTPS：
+启用本地 HTTPS 网关，同时保留局域网 HTTP：
 
 ```bash
 cp .env.example .env
-docker compose -f compose.yaml -f compose.frp.yaml up -d --build
+docker compose -f compose.yaml -f compose.https.yaml up -d --build
 ```
 
-云服务器只运行 frps，本地运行 sixPlan、frpc 和 Caddy。完整配置、端口和安全说明见 [deploy/README.md](deploy/README.md)。
+HTTPS 模式只在本机增加 Caddy，不包含任何公网转发工具。需要公网访问时，由项目外部的端口转发、隧道或反向代理将公网 `80/443` 转到本机 Caddy。完整配置、证书和安全说明见 [deploy/README.md](deploy/README.md)。
 
 ## 管理员命令
 
@@ -84,6 +84,11 @@ npm run admin -- promote username
 | `SIXPLAN_PORT` | `4173` | 服务端口 |
 | `SIXPLAN_DATA_DIR` | 系统应用数据目录下的 `sixplan` | 数据库、备份和导出文件目录 |
 | `SIXPLAN_DATA_VOLUME` | `sixplan-data` | Docker 数据卷名称；部署不同版本时应分别设置 |
+| `SIXPLAN_HTTPS_HOST` | 无 | HTTPS 证书对应的公网 IPv4；仅用于 `compose.https.yaml` |
+| `SIXPLAN_HTTPS_BIND` | `0.0.0.0` | Caddy 在宿主机上的监听地址 |
+| `SIXPLAN_HTTPS_HTTP_PORT` | `80` | Caddy 的 HTTP 校验和跳转端口 |
+| `SIXPLAN_HTTPS_PORT` | `443` | Caddy 的 HTTPS 端口 |
+| `ACME_EMAIL` | 无 | HTTPS 证书通知邮箱 |
 | `SIXPLAN_COOKIE_SECURE` | `auto` | `true`、`false` 或按可信代理协议自动判断的 `auto` |
 | `SIXPLAN_TRUST_PROXY` | 无 | 允许提供代理协议头的固定代理 IP 或 CIDR |
 | `SIXPLAN_ALLOW_OPEN_DATA_DIR` | `true` | Docker 或公网部署时设为 `false` |

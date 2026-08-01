@@ -2,7 +2,7 @@
 	email {$ACME_EMAIL}
 }
 
-https://{$SIXPLAN_PUBLIC_IP} {
+https://{$SIXPLAN_HTTPS_HOST} {
 	tls {
 		issuer acme {
 			profile shortlived

@@ -566,7 +566,7 @@ http://127.0.0.1:端口
 
 监听地址可以通过配置改为 `0.0.0.0`，供受控局域网内的设备访问。Docker Compose 默认提供 `http://本地服务器IP:4173` 局域网入口。无论从本机还是局域网访问，用户都必须登录后才能访问业务数据。
 
-需要公网访问时，支持在本地服务器同时运行 sixPlan、Caddy 和 frpc，在云服务器仅运行 frps。frpc 将云服务器公网 `80/443` 端口转发至本地 Caddy，由 Caddy 为云服务器公网 IPv4 自动申请和续期短期 IP 证书，并反向代理到 sixPlan。该模式不依赖域名，并同时保留局域网 HTTP 入口：
+HTTPS 部署在本地服务器同时运行 sixPlan 和 Caddy。Caddy 为配置的公网 IPv4 自动申请和续期短期 IP 证书，并反向代理到 sixPlan。项目只负责本地 HTTP/HTTPS 服务，不包含或配置任何公网端口转发、隧道和云服务器组件；需要公网访问时，由项目外部将公网 `80/443` 转发至本地 Caddy。该模式不依赖域名，并同时保留局域网 HTTP 入口：
 
 ```text
 局域网：http://本地服务器IP:4173
@@ -585,14 +585,12 @@ http://127.0.0.1:端口
 SQLite 数据库文件
 ```
 
-公网 IP HTTPS 部署架构为：
+HTTPS 部署架构为：
 
 ```text
 公网浏览器
     ↓ HTTPS
-云服务器 frps（仅负责 TCP 转发）
-    ↓ FRP 加密连接
-本地服务器 frpc
+外部网络转发层（不属于 sixPlan）
     ↓
 本地 Caddy（证书与 HTTPS 终止）
     ↓ HTTP，固定容器网络
@@ -1303,11 +1301,11 @@ frontend/
 - 用户级恢复不影响账号、会话、系统设置或其他用户。
 - 全站恢复采用完整覆盖，完成后所有会话失效。
 
-### 19.9 Docker Compose 与公网访问
+### 19.9 Docker Compose 与 HTTPS
 
 - 可以只启动 sixPlan 容器，通过 `http://本地服务器IP:4173` 在局域网访问。
-- 可以同时启动 sixPlan、Caddy 和 frpc，在保留局域网 HTTP 的同时通过 `https://云服务器公网IPv4` 访问。
-- 云服务器只需部署 frps，不需要部署 sixPlan、Caddy、证书工具或业务数据。
+- 可以同时启动 sixPlan 和本地 Caddy，在保留局域网 HTTP 的同时提供公网 IPv4 HTTPS 入口。
+- sixPlan 不包含或管理公网端口转发工具；任何云服务器、隧道和端口映射均属于项目外部基础设施。
 - 公网入口使用受信任的公网 IPv4 短期证书，并由本地 Caddy 自动申请和续期，不依赖域名。
 - 公网 HTTPS 与局域网 HTTP 使用同一份 SQLite 数据，两个入口的登录 Cookie 相互独立。
 - Docker 和公网部署不能调用“打开服务端数据目录”。
@@ -1327,7 +1325,7 @@ frontend/
 - 本地命令启动前后端
 - Docker Compose 构建和启动
 - 默认本机监听和可配置局域网监听
-- 可选的本地 Caddy、frpc 与云端仅 frps 公网 IP HTTPS 部署
+- 可选的本地 Caddy 公网 IP HTTPS 部署；外部网络转发不属于项目实现范围
 
 ### 第二阶段：认证与数据隔离
 

@@ -1,0 +1,30 @@
+services:
+  app:
+    environment:
+      SIXPLAN_TRUST_PROXY: 172.30.67.3
+
+  gateway:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "${SIXPLAN_HTTPS_BIND:-0.0.0.0}:${SIXPLAN_HTTPS_HTTP_PORT:-80}:80"
+      - "${SIXPLAN_HTTPS_BIND:-0.0.0.0}:${SIXPLAN_HTTPS_PORT:-443}:443"
+    environment:
+      SIXPLAN_HTTPS_HOST: "${SIXPLAN_HTTPS_HOST:?请设置证书对应的公网 IPv4}"
+      ACME_EMAIL: "${ACME_EMAIL:?请设置证书通知邮箱}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      sixplan:
+        ipv4_address: 172.30.67.3
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  caddy-data:
+    name: sixplan-caddy-data
+  caddy-config:
+    name: sixplan-caddy-config
