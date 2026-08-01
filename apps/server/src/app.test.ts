@@ -172,6 +172,42 @@ describe('sixPlan API', () => {
     expect(rejected.statusCode).toBe(400); expect(rejected.json()).toMatchObject({ code: 'CYCLE_DETECTED' });
   });
 
+  it('uses all nodes by default, calculates leaves and only enforces the selected prompt scope', async () => {
+    const cookie = await register('prompt-scope');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '学习' })).json<{ area: AreaDto }>().area;
+    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '英语学习' })).json<{ plan: PlanDto }>().plan;
+    const cet4 = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '四级', positionX: 100, positionY: 100 })).json<{ node: NodeDto }>().node;
+    const cet6 = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '六级', positionX: 400, positionY: 100 })).json<{ node: NodeDto }>().node;
+    await request(cookie, 'POST', `/api/plans/${plan.id}/edges`, { sourceNodeId: cet4.id, targetNodeId: cet6.id });
+    const updatedCet6 = (await request(cookie, 'PATCH', `/api/nodes/${cet6.id}`, { extraContent: '旧内容', expectedVersion: cet6.version })).json<{ node: NodeDto }>().node;
+    const allContext = (await request(cookie, 'GET', `/api/plans/${plan.id}/prompt-context`)).json<{ context: { scope: string; targetKeys: string[]; totalNodeCount: number; leafNodeCount: number } }>().context;
+    expect(allContext).toMatchObject({ scope: 'all', totalNodeCount: 2, leafNodeCount: 1 });
+    expect(allContext.targetKeys).toEqual([cet4.key, cet6.key]);
+    const leafContext = (await request(cookie, 'GET', `/api/plans/${plan.id}/prompt-context?scope=leaves`)).json<{ context: { targetKeys: string[]; nodes: Array<{ key: string; markdown?: string }> } }>().context;
+    expect(leafContext.targetKeys).toEqual([cet6.key]); expect(leafContext.nodes.map((node) => node.key)).toEqual([cet4.key, cet6.key]);
+    expect(leafContext.nodes.every((node) => !('markdown' in node))).toBe(true);
+
+    const current = (await request(cookie, 'GET', `/api/plans/${plan.id}`)).json<{ plan: PlanDto }>().plan;
+    const outsideScope = await request(cookie, 'POST', '/api/import-sessions/json', { targetPlanId: plan.id, promptScope: 'leaves',
+      content: { format: 'sixplan-plan-changeset', version: 2, targetPlanName: plan.name, baseRevision: current.graphRevision,
+        operations: { updateNodes: [{ key: cet4.key, changes: { markdown: '# 四级新计划' } }] } } });
+    expect(outsideScope.statusCode).toBe(400); expect(outsideScope.json()).toMatchObject({ code: 'PROMPT_SCOPE_VIOLATION' });
+
+    const combined = await request(cookie, 'POST', '/api/import-sessions/json', { targetPlanId: plan.id, promptScope: 'leaves',
+      content: { format: 'sixplan-plan-changeset', version: 2, targetPlanName: plan.name, baseRevision: current.graphRevision,
+        planChanges: { description: '长期英语学习计划' }, operations: {
+          addNodes: [{ key: 'review-stage', title: '复盘阶段' }],
+          updateNodes: [{ key: cet6.key, changes: { summary: '六级备考', markdown: '# 六级新计划' } }],
+          addEdges: [{ source: cet6.key, target: 'review-stage' }]
+        } } });
+    expect(combined.statusCode).toBe(200); const sessionId = combined.json<{ preview: { sessionId: string } }>().preview.sessionId;
+    expect((await request(cookie, 'POST', `/api/import-sessions/${sessionId}/apply`, {})).statusCode).toBe(200);
+    const graph = (await request(cookie, 'GET', `/api/plans/${plan.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(graph.plan.description).toBe('长期英语学习计划');
+    expect(graph.nodes.find((node) => node.id === updatedCet6.id)).toMatchObject({ summary: '六级备考', extraContent: '# 六级新计划' });
+    expect(graph.nodes.some((node) => node.key === 'review-stage')).toBe(true);
+  });
+
   it('enforces per-user import limits and isolates temporary sessions', async () => {
     const alice = await register('limit-alice'); const bob = await register('limit-bob');
     const area = (await request(alice, 'POST', '/api/areas', { name: '导入区' })).json<{ area: AreaDto }>().area;

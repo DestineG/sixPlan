@@ -1,17 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, Clipboard, Download, FileJson, RefreshCw, Sparkles, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import type { AreaDto, ImportPreviewDto, PlanDto } from '@sixplan/shared';
 import { api, ApiClientError } from '../api';
-import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt } from '../ai-prompts';
+import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt, type PromptContext } from '../ai-prompts';
 import { Modal } from './Dialogs';
 
 type Mode = 'snapshot' | 'changeset';
-interface PromptContext {
-  plan: { name: string; description: string; status: string; graphRevision: number };
-  nodes: Array<{ key: string; title: string; status: string; markdown?: string }>;
-  edges: Array<{ source: string; target: string }>;
-}
 
 function extractJson(text: string): string {
   const matches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
@@ -32,8 +27,7 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [idea, setIdea] = useState(''); const [areaHint, setAreaHint] = useState(''); const [planId, setPlanId] = useState('');
-  const [contextMode, setContextMode] = useState<'selection' | 'whole'>('selection'); const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
-  const [includeMarkdown, setIncludeMarkdown] = useState(false); const [graphContext, setGraphContext] = useState<PromptContext | null>(null);
+  const [scope, setScope] = useState<'all' | 'leaves'>('all'); const [graphContext, setGraphContext] = useState<PromptContext | null>(null);
   const [plans, setPlans] = useState<PlanDto[]>([]); const [prompt, setPrompt] = useState(''); const [raw, setRaw] = useState('');
   const [preview, setPreview] = useState<ImportPreviewDto | null>(null); const [repairPrompt, setRepairPrompt] = useState('');
   const [areaMode, setAreaMode] = useState<'existing' | 'create'>('existing'); const [targetAreaId, setTargetAreaId] = useState('');
@@ -46,30 +40,23 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
   useEffect(() => {
     if (!mode) return;
     setIdea(''); setAreaHint(''); setPrompt(''); setRaw(''); setPreview(null); setRepairPrompt(''); setGraphContext(null);
-    setSelectedKeys([]); setContextMode('selection'); setIncludeMarkdown(false); setAreaMode('existing'); setTargetAreaId(areas[0]?.id ?? ''); setCreateAreaName('');
+    setScope('all'); setAreaMode('existing'); setTargetAreaId(areas[0]?.id ?? ''); setCreateAreaName('');
   }, [areas, mode]);
   useEffect(() => {
     if (mode !== 'changeset' || !planId) { setGraphContext(null); return; }
-    const params = new URLSearchParams({ mode: 'whole', includeMarkdown: String(includeMarkdown) });
-    api<{ context: PromptContext }>(`/api/plans/${planId}/prompt-context?${params}`).then(({ context }) => {
-      setGraphContext(context); setSelectedKeys((current) => current.length ? current : context.nodes[0] ? [context.nodes[0].key] : []);
-    }).catch(() => setGraphContext(null));
-  }, [includeMarkdown, mode, planId]);
+    let active = true; setGraphContext(null);
+    api<{ context: PromptContext }>(`/api/plans/${planId}/prompt-context?scope=${scope}`).then(({ context }) => { if (active) setGraphContext(context); }).catch(() => { if (active) setGraphContext(null); });
+    return () => { active = false; };
+  }, [mode, planId, scope]);
 
   const selectedPlan = plans.find((plan) => plan.id === planId);
-  const visibleContext = useMemo(() => {
-    if (!graphContext || contextMode === 'whole' || selectedKeys.length === 0) return graphContext;
-    const keep = new Set(selectedKeys);
-    for (const edge of graphContext.edges) if (keep.has(edge.source) || keep.has(edge.target)) { keep.add(edge.source); keep.add(edge.target); }
-    return { ...graphContext, nodes: graphContext.nodes.filter((node) => keep.has(node.key)), edges: graphContext.edges.filter((edge) => keep.has(edge.source) && keep.has(edge.target)) };
-  }, [contextMode, graphContext, selectedKeys]);
 
   async function makePrompt() {
     if (!idea.trim()) return toast.error('请先描述你想要的计划或变更');
     if (mode === 'snapshot') setPrompt(buildSnapshotPrompt(idea, areaHint));
     else {
-      if (!visibleContext) return toast.error('正在加载计划上下文');
-      setPrompt(buildChangeSetPrompt(idea, visibleContext));
+      if (!graphContext) return toast.error('正在加载计划上下文');
+      setPrompt(buildChangeSetPrompt(idea, graphContext));
     }
     setRepairPrompt('');
   }
@@ -81,7 +68,8 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
     catch (error) { if (error instanceof Error && error.message === 'cancelled') return; setRepairPrompt(buildRepairPrompt(content, '不是有效的 JSON 文本')); return toast.error('不是有效的 JSON 文本'); }
     setBusy(true); setRepairPrompt('');
     try {
-      const result = await api<{ preview: ImportPreviewDto }>('/api/import-sessions/json', { method: 'POST', body: JSON.stringify({ content: json, sourceName, ...(mode === 'changeset' ? { targetPlanId: planId } : {}) }) });
+      const result = await api<{ preview: ImportPreviewDto }>('/api/import-sessions/json', { method: 'POST', body: JSON.stringify({ content: json, sourceName,
+        ...(mode === 'changeset' ? { targetPlanId: planId, promptScope: scope } : {}) }) });
       setRaw(json); setPreview(result.preview);
       if (result.preview.kind === 'snapshot') {
         const matching = areas.find((area) => area.name.toLocaleLowerCase() === (result.preview.suggestedAreaName ?? '').toLocaleLowerCase());
@@ -97,7 +85,10 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
     if (!file) return; setBusy(true); setRepairPrompt('');
     try {
       const form = new FormData(); form.append('file', file);
-      const query = mode === 'changeset' ? `?targetPlanId=${encodeURIComponent(planId)}` : '';
+      let query = '';
+      if (mode === 'changeset') {
+        query = `?${new URLSearchParams({ targetPlanId: planId, scope })}`;
+      }
       const result = await api<{ preview: ImportPreviewDto }>(`/api/import-sessions/upload${query}`, { method: 'POST', body: form });
       setRaw(''); setPreview(result.preview);
       if (result.preview.kind === 'snapshot') {
@@ -142,9 +133,8 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
         <label>你的想法<textarea rows={4} value={idea} onChange={(event) => setIdea(event.target.value)} placeholder={mode === 'snapshot' ? '例如：为半程马拉松准备一个分阶段训练计划' : '例如：在当前阶段后追加四周恢复训练'} /></label>
         <details className="ai-advanced"><summary>高级选项</summary>
           {mode === 'snapshot' ? <label>建议领域<input value={areaHint} onChange={(event) => setAreaHint(event.target.value)} placeholder="可选，导入时仍由你确认" /></label>
-          : <><div className="segmented"><button className={contextMode === 'selection' ? 'active' : ''} onClick={() => setContextMode('selection')}>选中节点及相邻节点</button><button className={contextMode === 'whole' ? 'active' : ''} onClick={() => setContextMode('whole')}>精简全图</button></div>
-            {contextMode === 'selection' && <div className="node-key-picker">{graphContext?.nodes.map((node) => <label key={node.key}><input type="checkbox" checked={selectedKeys.includes(node.key)} onChange={(event) => setSelectedKeys((current) => event.target.checked ? [...current, node.key] : current.filter((key) => key !== node.key))} /><span>{node.title}</span><code>{node.key}</code></label>)}</div>}
-            <label className="check-row"><input type="checkbox" checked={includeMarkdown} onChange={(event) => setIncludeMarkdown(event.target.checked)} />在上下文中包含 Markdown</label></>}
+          : <><div className="scope-control"><span>操作范围</span><div className="segmented"><button className={scope === 'all' ? 'active' : ''} onClick={() => { setScope('all'); setPrompt(''); }}>所有节点（{graphContext?.totalNodeCount ?? selectedPlan?.nodeCount ?? 0}）</button><button className={scope === 'leaves' ? 'active' : ''} onClick={() => { setScope('leaves'); setPrompt(''); }}>叶节点（{graphContext?.leafNodeCount ?? '-'}）</button></div></div>
+            {scope === 'all' && (graphContext?.totalNodeCount ?? 0) > 200 && <div className="notice warning">当前计划包含 {graphContext!.totalNodeCount} 个节点，生成的完整上下文可能超过部分模型的输入限制。</div>}</>}
         </details>
         <button className="primary-button" disabled={busy || (mode === 'changeset' && !selectedPlan)} onClick={makePrompt}><Sparkles size={17} />构造提示词</button>
       </section>

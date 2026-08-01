@@ -1,5 +1,9 @@
-interface PromptContext {
+export interface PromptContext {
   plan: { name: string; description: string; status: string; graphRevision: number };
+  scope: 'all' | 'leaves';
+  targetKeys: string[];
+  totalNodeCount: number;
+  leafNodeCount: number;
   nodes: Array<Record<string, unknown>>;
   edges: Array<{ source: string; target: string }>;
 }
@@ -12,6 +16,31 @@ const commonRules = `通用规则：
 - 连接语义为 target 依赖 source；禁止自环、重复连接和有向环。
 - 内容不确定时使用默认值，不要编造技术 ID、UUID 或时间戳。`;
 
+const fieldGuide = `sixPlan 界面字段与 JSON 字段严格对应：
+- “计划名称”对应 plan.name 或 planChanges.name。
+- “计划说明”对应 plan.description 或 planChanges.description。
+- “计划状态”对应 plan.status 或 planChanges.status，可选值为 planning、active、completed、paused。
+- “节点名称”对应 title。
+- “节点状态”对应 status，可选值为 not_started、in_progress、completed、paused、abandoned。
+- “开始日期”和“结束日期”对应 startDate 和 endDate。
+- “简短说明”或“摘要”对应 summary，只保存简短概述。
+- “附加信息”“详细内容”“详细计划”或“Markdown”对应 markdown，用于完整的 Markdown 长文本。
+- “画布坐标”对应 position: { x, y }，没有明确要求时不要输出，由 sixPlan 自动布局。
+- summary 和 markdown 是两个独立字段；详细计划不得写入 summary。
+- updateNodes 中出现 markdown 就会完整覆盖原附加信息；不修改附加信息时必须省略 markdown。`;
+
+const changeSetContract = `sixPlan v2 增量协议（以下能力始终可用，按用户要求选择必要操作）：
+- 顶层只允许 format、version、targetPlanName、baseRevision、planChanges、operations。
+- planChanges 可修改 name、description、status；用户没有要求修改计划本身时省略整个 planChanges。
+- operations.addNodes：新增节点对象。必填 key、title；可选 status、startDate、endDate、summary、markdown、position、createdAt、updatedAt。
+- operations.updateNodes：使用 { "key": "现有节点 key", "changes": { ... } } 更新节点；changes 可包含 title、status、startDate、endDate、summary、markdown、position，且至少包含一个字段。
+- operations.removeNodes：要删除的现有节点 key 字符串数组。
+- operations.addEdges 和 removeEdges：使用 { "source": "前置节点 key", "target": "后继节点 key" } 表示连接。
+- operations 必须存在；五个操作数组都可省略，禁止为了补齐格式而输出无关操作。
+- addNodes 中未给 status 时默认为 not_started，日期默认为 null，summary 和 markdown 默认为空字符串。
+- createdAt 和 updatedAt 只用于保留已知的原始时间；当前任务中不要编造，应当省略。
+- position 通常省略，sixPlan 会为新增节点自动布局。`;
+
 export function buildSnapshotPrompt(idea: string, areaName?: string): string {
   return `你正在为 sixPlan 生成一个全新的 DAG 计划。
 
@@ -19,6 +48,7 @@ export function buildSnapshotPrompt(idea: string, areaName?: string): string {
 ${idea.trim()}
 ${areaName?.trim() ? `\n建议领域：${areaName.trim()}\n` : ''}
 ${commonRules}
+${fieldGuide}
 
 请输出以下 sixPlan v2 快照格式：
 {
@@ -48,40 +78,46 @@ status、日期、description、summary、markdown 和 position 都可以省略�
 }
 
 export function buildChangeSetPrompt(idea: string, context: PromptContext): string {
+  const scopeLabel = context.scope === 'all' ? `所有节点（${context.targetKeys.length}/${context.totalNodeCount}）` : `叶节点（${context.targetKeys.length}/${context.totalNodeCount}，叶节点指没有后继节点的节点，与状态无关）`;
   return `你正在为 sixPlan 的现有 DAG 计划生成增量变更，不要重建整个计划。
 
 用户想法：
 ${idea.trim()}
 
-当前计划上下文（只读）：
+操作范围：${scopeLabel}
+允许操作的现有节点 key：
+${JSON.stringify(context.targetKeys, null, 2)}
+
+当前计划上下文（只读；其中可能包含不在操作范围内的参考节点）：
 ${JSON.stringify(context, null, 2)}
 
 ${commonRules}
+${fieldGuide}
+${changeSetContract}
+- updateNodes 和 removeNodes 只能引用“允许操作的现有节点 key”。范围外节点仅供理解，不得修改或删除。
+- addNodes 可以声明全新 key；涉及现有节点的新增或删除连接只能使用允许操作的 key。
+- 操作范围表示哪些现有节点可以被修改，不代表必须修改范围内每一个节点；是否需要覆盖全部目标以用户想法为准。
+- 如果用户明确说“每个”“全部”或“所有”，应对操作范围内的每一个目标节点完成要求。
 - 只能引用上下文中已有的 key，或本次 addNodes 中声明的新 key。
-- 不要修改用户未要求修改的节点。
+- 采用最小变更原则，只输出实现用户想法所必需的字段和操作；但不得因为用户提到某个字段，就忽略其同时提出的其他操作。
+- 除非用户明确要求修改计划本身，否则不要输出 planChanges。
 - 不能归档、恢复、移动领域或删除整个计划。
+- 当前上下文故意不包含旧 markdown；任何 markdown 更新都是完整覆盖。
 
-请输出以下 sixPlan v2 增量格式，baseRevision 必须保持为 ${context.plan.graphRevision}：
+以下两个值是只读常量，必须逐字复制，禁止翻译、简称、改写或猜测：
+- targetPlanName = ${JSON.stringify(context.plan.name)}
+- baseRevision = ${context.plan.graphRevision}
+
+输出必须以这个骨架为基础，并按用户要求填入必要操作。不要复制占位文本，也不要为了展示协议而制造无关变更：
 {
   "format": "sixplan-plan-changeset",
   "version": 2,
   "targetPlanName": ${JSON.stringify(context.plan.name)},
   "baseRevision": ${context.plan.graphRevision},
-  "planChanges": {
-    "name": "可选的新名称",
-    "description": "可选的新说明",
-    "status": "planning | active | completed | paused"
-  },
-  "operations": {
-    "addNodes": [],
-    "updateNodes": [{ "key": "existing-key", "changes": { "status": "completed" } }],
-    "removeNodes": [],
-    "addEdges": [{ "source": "source-key", "target": "target-key" }],
-    "removeEdges": []
-  }
+  "operations": {}
 }
 
-planChanges 可整体省略；五个操作数组可以省略空数组。addNodes 的字段与快照节点一致。`;
+输出前逐项自检：目标计划名和版本未变化、完整理解了用户的组合要求、操作范围正确、字段映射正确、没有无关修改、用户明确要求的所有目标均已处理。`;
 }
 
 export function buildRepairPrompt(rawJson: string, error: string): string {
@@ -89,6 +125,11 @@ export function buildRepairPrompt(rawJson: string, error: string): string {
 
 校验错误：
 ${error}
+
+${fieldGuide}
+${changeSetContract}
+- 保留原始 targetPlanName 和 baseRevision，不要翻译、简称、改写或猜测。
+- 只修复错误，不要把完整协议中的示例能力都变成实际操作。
 
 原始 JSON：
 ${rawJson}`;

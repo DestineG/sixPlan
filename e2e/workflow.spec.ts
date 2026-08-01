@@ -144,8 +144,13 @@ test('AI 提示词、快照和增量 JSON 工作流', async ({ page }) => {
   await page.getByRole('menuitem', { name: 'AI 扩展现有计划' }).click();
   await expect(page.getByLabel('目标计划')).toHaveValue(/.+/);
   await page.getByLabel('你的想法').fill('在基础阶段后增加进阶阶段');
+  await page.getByText('高级选项').click();
+  const allNodesScope = page.getByRole('button', { name: '所有节点（1）' }); const leafScope = page.getByRole('button', { name: '叶节点（1）' });
+  await expect(allNodesScope).toHaveClass(/active/); await leafScope.click(); await expect(leafScope).toHaveClass(/active/); await allNodesScope.click();
+  await expect(allNodesScope).toHaveClass(/active/);
   await page.getByRole('button', { name: '构造提示词' }).click();
   await expect(page.getByLabel('生成的提示词')).toContainText('sixplan-plan-changeset');
+  await expect(page.getByLabel('生成的提示词')).toContainText('操作范围：所有节点（1/1）');
   const changeset = {
     format: 'sixplan-plan-changeset', version: 2, targetPlanName: 'AI 长期训练', baseRevision: 1,
     operations: { addNodes: [{ key: 'advanced-stage', title: '进阶阶段' }], addEdges: [{ source: 'base-stage', target: 'advanced-stage' }] }

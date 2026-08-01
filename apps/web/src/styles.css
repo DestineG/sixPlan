@@ -158,12 +158,7 @@ input:disabled, textarea:disabled, select:disabled { color: #5f6b70; background:
 .segmented { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border-radius: 6px; background: #e9eef0; }
 .segmented button { min-height: 32px; border: 0; border-radius: 4px; background: transparent; color: #526168; font-size: 12px; }
 .segmented button.active { background: #fff; color: var(--brand-dark); box-shadow: 0 1px 4px rgb(34 52 59 / 12%); }
-.node-key-picker { max-height: 170px; overflow-y: auto; display: grid; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
-.node-key-picker label { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid #edf0f1; font-size: 12px; }
-.node-key-picker label:last-child { border-bottom: 0; }
-.node-key-picker span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.node-key-picker code { color: var(--muted); font-size: 10px; }
-.check-row { display: flex !important; grid-auto-flow: column; justify-content: start; align-items: center; gap: 8px; }
+.scope-control { display: grid; gap: 7px; color: #3a474e; font-size: 13px; font-weight: 650; }
 .prompt-output, .repair-box textarea { font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; line-height: 1.5; background: #f6f8f9; }
 .inline-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .repair-box { display: grid; gap: 9px; padding: 12px; border: 1px solid #e6bd76; border-radius: 6px; background: #fff8eb; }

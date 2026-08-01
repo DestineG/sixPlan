@@ -11,9 +11,28 @@ describe('AI prompt construction', () => {
   });
 
   it('pins changesets to the current graph revision', () => {
-    const prompt = buildChangeSetPrompt('增加恢复阶段', { plan: { name: '训练', description: '', status: 'active', graphRevision: 18 }, nodes: [], edges: [] });
+    const prompt = buildChangeSetPrompt('增加恢复阶段', { plan: { name: '训练', description: '', status: 'active', graphRevision: 18 },
+      scope: 'leaves', targetKeys: ['last-stage'], totalNodeCount: 4, leafNodeCount: 1, nodes: [], edges: [] });
     expect(prompt).toContain('"baseRevision": 18');
+    expect(prompt).toContain('叶节点（1/4');
+    expect(prompt).toContain('targetPlanName = "训练"');
     expect(prompt).toContain('增加恢复阶段');
+  });
+
+  it('documents markdown semantics without narrowing the full changeset protocol', () => {
+    const prompt = buildChangeSetPrompt('在附加信息中给每个节点添加详细计划', { plan: { name: '英语学习', description: '', status: 'planning', graphRevision: 2 },
+      scope: 'all', targetKeys: ['cet-4', 'cet-6'], totalNodeCount: 2, leafNodeCount: 2, nodes: [], edges: [] });
+    expect(prompt).toContain('操作范围：所有节点（2/2）');
+    expect(prompt).toContain('完整覆盖原附加信息');
+    expect(prompt).toContain('详细计划不得写入 summary');
+    expect(prompt).toContain('每一个目标节点');
+    expect(prompt).toContain('operations.addNodes');
+    expect(prompt).toContain('operations.updateNodes');
+    expect(prompt).toContain('operations.removeNodes');
+    expect(prompt).toContain('operations.addEdges 和 removeEdges');
+    expect(prompt).toContain('planChanges 可修改');
+    expect(prompt).toContain('不得因为用户提到某个字段，就忽略其同时提出的其他操作');
+    expect(prompt).not.toContain('changes 只允许包含');
   });
 
   it('includes validation errors in repair prompts', () => {
