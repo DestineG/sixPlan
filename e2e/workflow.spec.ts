@@ -38,6 +38,12 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.locator('.graph-node').first().click();
   await page.getByLabel('名称').fill('学习推理基础');
   await page.getByLabel('简短说明').fill('完成基础知识梳理');
+  await page.getByRole('button', { name: '设置起止日期为今天' }).click();
+  const startDate = await page.getByLabel('开始日期').inputValue();
+  const initialEndDate = await page.getByLabel('结束日期').inputValue();
+  expect(startDate).toBeTruthy(); expect(initialEndDate).toBe(startDate);
+  await page.getByRole('button', { name: '+1天', exact: true }).click();
+  expect(await page.getByLabel('结束日期').inputValue()).not.toBe(initialEndDate);
   await expect(page.getByText('已保存')).toBeVisible();
   await page.getByRole('button', { name: '编辑附加信息' }).click();
   await page.locator('.cm-content').click();
@@ -62,12 +68,30 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('menuitem', { name: '恢复' }).click();
   await expect(page.getByText('计划已恢复')).toBeVisible();
 
+  const areaRow = page.locator('.area-row').filter({ hasText: '工作' }).first();
+  await areaRow.hover();
+  await areaRow.getByLabel('工作领域操作').click();
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('menuitem', { name: '导出领域' }).click();
+  const areaDownload = await downloadPromise; const areaFilePath = await areaDownload.path();
+  if (!areaFilePath) throw new Error('领域导出文件不可用');
+  await page.getByRole('button', { name: '导入', exact: true }).click();
+  await page.getByRole('menuitem', { name: '导入领域' }).click();
+  await page.locator('input[type="file"]').setInputFiles(areaFilePath);
+  await page.getByLabel('导入方式').selectOption('create');
+  await expect(page.getByLabel('新领域名称')).toHaveValue('工作（导入）');
+  await page.getByRole('button', { name: '导入领域', exact: true }).click();
+  await expect(page.getByText(/领域“工作（导入）”已导入/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /工作（导入）/ }).first()).toBeVisible();
+
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: /工作/ }).first().click();
   await page.getByRole('button', { name: /实习准备/ }).click();
   await expect(page.getByText('移动端只读')).toBeVisible();
   await expect(page.getByRole('button', { name: '添加节点' })).toHaveCount(0);
   await expect(page.locator('.graph-node').first()).toBeVisible();
+  await page.locator('.graph-node').first().click();
+  await expect(page.getByRole('button', { name: '设置起止日期为今天' })).toHaveCount(0);
   await page.waitForTimeout(2800);
   await page.screenshot({ path: 'test-results/mobile-graph.png', fullPage: true });
 });

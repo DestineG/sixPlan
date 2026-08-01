@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Archive, ArrowDown, ArrowUp, Download, FileUp, Folder, FolderPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { Archive, ArrowDown, ArrowUp, Download, FileInput, FileUp, Folder, FolderInput, FolderPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -16,7 +16,7 @@ export function OverviewPage() {
   const [areaModal, setAreaModal] = useState<{ open: boolean; area?: AreaDto }>({ open: false });
   const [planModal, setPlanModal] = useState<{ open: boolean; plan?: PlanDto }>({ open: false });
   const [movePlan, setMovePlan] = useState<PlanDto | null>(null); const [confirm, setConfirm] = useState<{ plan: PlanDto; kind: 'archive' | 'delete' } | null>(null);
-  const [importOpen, setImportOpen] = useState(false);
+  const [importMode, setImportMode] = useState<'plan' | 'area' | null>(null);
   const areasQuery = useQuery({ queryKey: ['areas'], queryFn: () => api<{ areas: AreaDto[] }>('/api/areas') });
   const plansQuery = useQuery({ queryKey: ['plans', selection], queryFn: () => selection === 'archived'
     ? api<{ plans: PlanDto[] }>('/api/plans/archived')
@@ -52,15 +52,21 @@ export function OverviewPage() {
         <div className="area-actions">
           <button className="mini-icon" title="上移" disabled={index === 0} onClick={() => reorder(area, -1)}><ArrowUp size={13} /></button>
           <button className="mini-icon" title="下移" disabled={index === areas.length - 1} onClick={() => reorder(area, 1)}><ArrowDown size={13} /></button>
-          <button className="mini-icon" title="重命名" onClick={() => setAreaModal({ open: true, area })}><Pencil size={13} /></button>
-          <button className="mini-icon" title="删除" onClick={() => deleteArea(area)}><Trash2 size={13} /></button>
+          <DropdownMenu.Root><DropdownMenu.Trigger className="mini-icon" aria-label={`${area.name}领域操作`}><MoreHorizontal size={13} /></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="start">
+            <DropdownMenu.Item onSelect={() => setAreaModal({ open: true, area })}><Pencil size={15} />重命名</DropdownMenu.Item>
+            <DropdownMenu.Item onSelect={() => downloadFile(`/api/areas/${area.id}/export`).catch(showError)}><Download size={15} />导出领域</DropdownMenu.Item>
+            <DropdownMenu.Item className="menu-danger" onSelect={() => deleteArea(area)}><Trash2 size={15} />删除</DropdownMenu.Item>
+          </DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root>
         </div></div>)}</div>
       <button className={`area-nav archive-nav ${selection === 'archived' ? 'active' : ''}`} onClick={() => setSelection('archived')}><Archive size={17} /><span>已归档</span><small>{areas.reduce((sum, area) => sum + area.archivedPlanCount, 0)}</small></button>
     </aside>
     <section className="overview-content">
       <div className="page-heading"><div><p className="eyebrow">计划空间</p><h1>{selection === 'all' ? '全部计划' : selection === 'archived' ? '已归档' : areas.find((area) => area.id === selection)?.name ?? '计划'}</h1>
         <p>{selection === 'archived' ? '归档计划保持只读，可随时恢复或导出。' : `${plans.length} 个计划`}</p></div>
-        <div className="heading-actions"><button className="secondary-button" onClick={() => setImportOpen(true)}><FileUp size={17} />导入</button>
+        <div className="heading-actions"><DropdownMenu.Root><DropdownMenu.Trigger asChild><button className="secondary-button"><FileUp size={17} />导入</button></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="end">
+          <DropdownMenu.Item onSelect={() => setImportMode('plan')}><FileInput size={15} />导入计划</DropdownMenu.Item>
+          <DropdownMenu.Item onSelect={() => setImportMode('area')}><FolderInput size={15} />导入领域</DropdownMenu.Item>
+        </DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root>
           {selection !== 'archived' && <button className="primary-button" disabled={areas.length === 0} onClick={() => setPlanModal({ open: true })}><Plus size={17} />新建计划</button>}</div></div>
       {areas.length === 0 ? <EmptyState icon={<FolderPlus size={28} />} title="先创建一个领域" body="领域用于组织工作、学习和生活中的不同计划。" action={() => setAreaModal({ open: true })} actionLabel="新建领域" />
       : plansQuery.isLoading ? <div className="page-loader"><span className="spinner" />加载计划</div>
@@ -71,7 +77,8 @@ export function OverviewPage() {
     <AreaEditor state={areaModal} onClose={() => setAreaModal({ open: false })} onSaved={refresh} />
     <PlanEditor state={planModal} areas={areas} preferredAreaId={selection !== 'all' && selection !== 'archived' ? selection : undefined} onClose={() => setPlanModal({ open: false })} onSaved={refresh} />
     <MovePlanModal plan={movePlan} areas={areas} onClose={() => setMovePlan(null)} onSaved={refresh} />
-    <ImportPlansModal open={importOpen} areas={areas} existingPlans={plans} onClose={() => setImportOpen(false)} onImported={refresh} />
+    <ImportPlansModal open={importMode === 'plan'} areas={areas} existingPlans={plans} onClose={() => setImportMode(null)} onImported={refresh} />
+    <ImportAreaModal open={importMode === 'area'} areas={areas} onClose={() => setImportMode(null)} onImported={refresh} />
     <ConfirmDialog open={Boolean(confirm)} onOpenChange={(open) => !open && setConfirm(null)} title={confirm?.kind === 'archive' ? '归档计划' : '永久删除计划'}
       description={confirm?.kind === 'archive' ? `“${confirm?.plan.name}”归档后将变为只读并移入已归档视图。` : `“${confirm?.plan.name}”及其全部节点和连接将永久删除，此操作无法撤销。`}
       confirmLabel={confirm?.kind === 'archive' ? '确认归档' : '永久删除'} danger={confirm?.kind === 'delete'} onConfirm={async () => { if (!confirm) return;
@@ -138,5 +145,53 @@ function ImportPlansModal({ open, areas, existingPlans, onClose, onImported }: {
     <div className="import-toolbar"><input ref={input} type="file" accept=".json,.plan.json" multiple hidden onChange={(e) => choose(e.target.files)} /><button className="secondary-button" onClick={() => input.current?.click()}><FileUp size={17} />选择文件</button>{items.length > 1 && <><select value={defaultArea} onChange={(e) => setDefaultArea(e.target.value)}><option value="">本批默认领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select><button className="secondary-button" onClick={applyDefault}>应用到全部</button></>}</div>
     <div className="import-list">{items.length === 0 ? <div className="empty-inline">尚未选择文件</div> : items.map((item, index) => <div className="import-row" key={`${item.fileName}-${index}`}><div><strong>{item.planName}</strong><small>{item.fileName}{item.areaName ? ` · 文件领域：${item.areaName}` : ''}</small></div><select value={item.targetAreaId} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, targetAreaId: e.target.value, createAreaName: '' } : entry))}><option value="">创建文件中的领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select>{!item.targetAreaId && <input aria-label="新领域名称" placeholder="新领域名称" value={item.createAreaName} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, createAreaName: e.target.value } : entry))} />}</div>)}</div>
     <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy || items.length === 0} onClick={submit}>{busy ? '正在导入' : `导入 ${items.length || ''} 个计划`}</button></div>
+  </Modal>;
+}
+
+interface AreaImportItem { fileName: string; content: unknown; areaName: string; planCount: number; matchingArea?: AreaDto; }
+type AreaImportMode = '' | 'merge' | 'create';
+
+function ImportAreaModal({ open, areas, onClose, onImported }: { open: boolean; areas: AreaDto[]; onClose: () => void; onImported: () => Promise<void> }) {
+  const input = useRef<HTMLInputElement>(null); const [item, setItem] = useState<AreaImportItem | null>(null);
+  const [mode, setMode] = useState<AreaImportMode>(''); const [createAreaName, setCreateAreaName] = useState(''); const [busy, setBusy] = useState(false);
+  function reset() { setItem(null); setMode(''); setCreateAreaName(''); if (input.current) input.current.value = ''; }
+  async function choose(files: FileList | null) {
+    const file = files?.[0]; if (!file) return;
+    try {
+      const content = JSON.parse(await file.text()) as { format?: string; area?: { name?: string }; plans?: unknown[] };
+      if (content.format !== 'sixplan-area' || !content.area?.name || !Array.isArray(content.plans)) throw new Error('文件格式不正确');
+      const matchingArea = areas.find((area) => area.name.toLocaleLowerCase() === content.area!.name!.toLocaleLowerCase());
+      setItem({ fileName: file.name, content, areaName: content.area.name, planCount: content.plans.length, ...(matchingArea ? { matchingArea } : {}) });
+      setMode(matchingArea ? '' : 'create');
+      setCreateAreaName(matchingArea ? `${content.area.name}（导入）` : content.area.name);
+    } catch { reset(); toast.error(`${file.name} 不是有效的领域文件`); }
+  }
+  async function submit() {
+    if (!item || !mode) return;
+    if (mode === 'create' && !createAreaName.trim()) return toast.error('请输入新领域名称');
+    setBusy(true);
+    try {
+      const body = mode === 'merge'
+        ? { mode, content: item.content, targetAreaId: item.matchingArea?.id }
+        : { mode, content: item.content, createAreaName };
+      const result = await api<{ areaName: string; importedPlanCount: number }>('/api/area-imports', { method: 'POST', body: JSON.stringify(body) });
+      toast.success(`领域“${result.areaName}”已导入，共 ${result.importedPlanCount} 个计划`);
+      await onImported(); reset(); onClose();
+    } catch (error) { showError(error); } finally { setBusy(false); }
+  }
+  return <Modal open={open} onOpenChange={(value) => { if (!value) { reset(); onClose(); } }} title="导入领域" description="领域文件会作为一个整体校验和导入，失败时不会写入部分数据。">
+    <div className="import-toolbar"><input ref={input} type="file" accept=".json,.area.json" hidden onChange={(e) => choose(e.target.files)} /><button className="secondary-button" onClick={() => input.current?.click()}><FolderInput size={17} />选择领域文件</button></div>
+    {!item ? <div className="empty-inline area-import-empty">尚未选择文件</div> : <div className="stack-form">
+      <div className="area-import-summary"><Folder size={19} /><div><strong>{item.areaName}</strong><small>{item.fileName} · {item.planCount} 个计划</small></div></div>
+      <label>导入方式<select value={mode} onChange={(e) => setMode(e.target.value as AreaImportMode)}>
+        {item.matchingArea && <option value="">请选择导入方式</option>}
+        {item.matchingArea && <option value="merge">合并到已有领域“{item.matchingArea.name}”</option>}
+        <option value="create">创建新领域</option>
+      </select></label>
+      {mode === 'create' && <label>新领域名称<input value={createAreaName} maxLength={100} onChange={(e) => setCreateAreaName(e.target.value)} /></label>}
+      {item.matchingArea && mode === '' && <div className="notice warning">检测到同名领域。请选择合并，或创建一个名称不同的新领域。</div>}
+      {mode === 'merge' && <div className="notice warning">文件中的计划将作为独立副本加入已有领域，不会覆盖同名计划。</div>}
+    </div>}
+    <div className="dialog-actions"><button className="secondary-button" onClick={() => { reset(); onClose(); }}>取消</button><button className="primary-button" disabled={busy || !item || !mode || (mode === 'create' && !createAreaName.trim())} onClick={submit}>{busy ? '正在导入' : '导入领域'}</button></div>
   </Modal>;
 }

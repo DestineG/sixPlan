@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import type { InjectOptions, Response as InjectResponse } from 'light-my-request';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from './app.js';
-import type { AreaDto, EdgeDto, ImportResult, NodeDto, PlanDto } from '@sixplan/shared';
+import type { AreaDto, AreaFile, EdgeDto, GraphDto, ImportResult, NodeDto, PlanDto } from '@sixplan/shared';
 import { collectBackup, decodeBackup, encodeBackup, restoreSiteBackup, restoreUserBackup } from './backup.js';
 import { createUser } from './auth.js';
 
@@ -74,6 +74,56 @@ describe('sixPlan API', () => {
     expect(results).toHaveLength(2); expect(results[0]).toMatchObject({ success: true }); expect(results[1]).toMatchObject({ success: false });
     expect(results[0]!.plan!.id).not.toBe(plan.id); expect(results[0]!.plan!.archivedAt).toBe(archived.archivedAt);
     expect(results[0]!.plan!.createdAt).toBe(plan.createdAt);
+  });
+
+  it('exports and atomically imports complete areas by creating or merging', async () => {
+    const cookie = await register('area-importer');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '工作' })).json<{ area: AreaDto }>().area;
+    const archivedPlan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '季度规划', description: '保留完整图数据' })).json<{ plan: PlanDto }>().plan;
+    const activePlan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '日常事项', status: 'active' })).json<{ plan: PlanDto }>().plan;
+    const node = (await request(cookie, 'POST', `/api/plans/${archivedPlan.id}/nodes`, { title: '里程碑', positionX: 123, positionY: 456 })).json<{ node: NodeDto }>().node;
+    const updatedNode = (await request(cookie, 'PATCH', `/api/nodes/${node.id}`, {
+      startDate: '2026-08-01', endDate: '2026-09-01', summary: '关键节点', extraContent: '# 记录', expectedVersion: node.version
+    })).json<{ node: NodeDto }>().node;
+    await request(cookie, 'POST', `/api/plans/${archivedPlan.id}/archive`, { expectedVersion: archivedPlan.version });
+
+    const exported = await request(cookie, 'GET', `/api/areas/${area.id}/export`);
+    expect(exported.statusCode).toBe(200);
+    const file = exported.json<AreaFile>();
+    expect(file).toMatchObject({ format: 'sixplan-area', version: 1, area: { name: '工作' } });
+    expect(file.plans.map((entry) => entry.plan.name)).toHaveLength(2);
+    expect(file.plans.map((entry) => entry.plan.name)).toEqual(expect.arrayContaining(['季度规划', '日常事项']));
+    expect(file.plans.find((entry) => entry.plan.name === '季度规划')?.plan.archivedAt).not.toBeNull();
+
+    const created = await request(cookie, 'POST', '/api/area-imports', { mode: 'create', createAreaName: '工作（导入）', content: file });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ areaName: '工作（导入）', importedPlanCount: 2 });
+    const importedArea = (await request(cookie, 'GET', '/api/areas')).json<{ areas: AreaDto[] }>().areas.find((entry) => entry.name === '工作（导入）')!;
+    expect(importedArea).toBeDefined();
+    const importedArchived = (await request(cookie, 'GET', '/api/plans/archived')).json<{ plans: PlanDto[] }>().plans.find((entry) => entry.areaId === importedArea.id)!;
+    expect(importedArchived.id).not.toBe(archivedPlan.id);
+    const importedActive = (await request(cookie, 'GET', `/api/plans?areaId=${importedArea.id}`)).json<{ plans: PlanDto[] }>().plans;
+    expect(importedActive).toHaveLength(1); expect(importedActive[0]).toMatchObject({ name: activePlan.name, status: 'active' });
+    const graph = (await request(cookie, 'GET', `/api/plans/${importedArchived.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(graph.nodes[0]).toMatchObject({ startDate: '2026-08-01', endDate: '2026-09-01', summary: '关键节点', extraContent: '# 记录', positionX: 123, positionY: 456 });
+    expect(graph.nodes[0]!.id).not.toBe(updatedNode.id);
+
+    const merged = await request(cookie, 'POST', '/api/area-imports', { mode: 'merge', targetAreaId: area.id, content: file });
+    expect(merged.statusCode).toBe(201); expect(merged.json()).toMatchObject({ areaId: area.id, importedPlanCount: 2 });
+    const originalActivePlans = (await request(cookie, 'GET', `/api/plans?areaId=${area.id}`)).json<{ plans: PlanDto[] }>().plans;
+    const originalArchivedPlans = (await request(cookie, 'GET', '/api/plans/archived')).json<{ plans: PlanDto[] }>().plans.filter((entry) => entry.areaId === area.id);
+    expect(originalActivePlans).toHaveLength(2); expect(originalArchivedPlans).toHaveLength(2);
+
+    const invalidFile = structuredClone(file);
+    invalidFile.plans[0]!.edges.push({ id: 'bad-edge', sourceNodeId: invalidFile.plans[0]!.nodes[0]!.id,
+      targetNodeId: 'missing-node', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    const invalid = await request(cookie, 'POST', '/api/area-imports', { mode: 'create', createAreaName: '不完整领域', content: invalidFile });
+    expect(invalid.statusCode).toBe(400); expect(invalid.json()).toMatchObject({ code: 'INVALID_EDGE_REFERENCE' });
+    const names = (await request(cookie, 'GET', '/api/areas')).json<{ areas: AreaDto[] }>().areas.map((entry) => entry.name);
+    expect(names).not.toContain('不完整领域');
+
+    const conflict = await request(cookie, 'POST', '/api/area-imports', { mode: 'create', createAreaName: '工作', content: file });
+    expect(conflict.statusCode).toBe(409); expect(conflict.json()).toMatchObject({ code: 'AREA_NAME_EXISTS' });
   });
 
   it('restores user data without affecting sessions and site data with all sessions revoked', async () => {

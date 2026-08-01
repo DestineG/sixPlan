@@ -111,11 +111,7 @@ export const PlanFileEdgeSchema = z.object({
   updatedAt: z.string().datetime()
 });
 
-export const PlanFileSchema = z.object({
-  format: z.literal('sixplan-plan'),
-  version: z.literal(1),
-  exportedAt: z.string().datetime(),
-  areaName: z.string(),
+export const PlanFilePayloadSchema = z.object({
   plan: z.object({
     name: z.string().min(1).max(200),
     description: z.string().max(5000),
@@ -128,7 +124,28 @@ export const PlanFileSchema = z.object({
   edges: z.array(PlanFileEdgeSchema)
 });
 
+export const PlanFileSchema = PlanFilePayloadSchema.extend({
+  format: z.literal('sixplan-plan'),
+  version: z.literal(1),
+  exportedAt: z.string().datetime(),
+  areaName: z.string()
+});
+
+export const AreaFileSchema = z.object({
+  format: z.literal('sixplan-area'),
+  version: z.literal(1),
+  exportedAt: z.string().datetime(),
+  area: z.object({
+    name: z.string().min(1).max(100),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime()
+  }),
+  plans: z.array(PlanFilePayloadSchema)
+});
+
+export type PlanFilePayload = z.infer<typeof PlanFilePayloadSchema>;
 export type PlanFile = z.infer<typeof PlanFileSchema>;
+export type AreaFile = z.infer<typeof AreaFileSchema>;
 
 export interface ImportDecision {
   fileName: string;

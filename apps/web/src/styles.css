@@ -137,6 +137,12 @@ input:disabled, textarea:disabled, select:disabled { color: #5f6b70; background:
 .import-row strong, .import-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-row small { color: var(--muted); margin-top: 4px; }
 .empty-inline { padding: 35px; text-align: center; color: var(--muted); }
+.area-import-empty { border: 1px solid var(--line); border-radius: 6px; }
+.area-import-summary { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafb; }
+.area-import-summary svg { color: var(--brand); }
+.area-import-summary div { min-width: 0; }
+.area-import-summary strong, .area-import-summary small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.area-import-summary small { margin-top: 3px; color: var(--muted); font-size: 12px; }
 
 .graph-page { height: calc(100vh - 58px); display: flex; flex-direction: column; min-height: 0; }
 .graph-toolbar { min-height: 64px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: #fff; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -158,6 +164,10 @@ input:disabled, textarea:disabled, select:disabled { color: #5f6b70; background:
 .panel-heading > div { display: flex; align-items: center; justify-content: space-between; }
 .panel-form { padding: 17px; display: grid; gap: 16px; }
 .date-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.date-shortcuts { display: grid; gap: 8px; margin-top: -7px; }
+.date-shortcuts .today-shortcut { width: 100%; }
+.duration-shortcuts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.duration-shortcuts button { min-width: 0; padding: 7px 4px; font-size: 11px; white-space: nowrap; }
 .save-state { font-size: 11px; font-weight: 550; }
 .save-state.saving { color: var(--blue); }.save-state.saved { color: #367132; }.save-state.error { color: var(--danger); }
 .graph-node { width: 240px; min-height: 116px; padding: 13px 14px; border: 1px solid #cbd3d7; border-left-width: 4px; border-radius: 7px; background: #fff; box-shadow: 0 4px 13px rgb(26 42 49 / 9%); }

@@ -3,12 +3,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow, type Connection, type Edge, type Node, type NodeTypes } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
-import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, Download, Plus, Trash2 } from 'lucide-react';
+import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, CalendarDays, Download, Plus, Trash2 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { nodeStatusLabels, type EdgeDto, type GraphDto, type NodeDto } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile } from '../api';
 import { PlanNodeCard, type PlanNodeData } from '../components/PlanNodeCard';
+import { addToDateOnly, localToday, type DateIncrementUnit } from '../date-utils';
 
 type FlowNode = Node<PlanNodeData, 'planNode'>;
 type FlowEdge = Edge<{ edge: EdgeDto }>;
@@ -77,9 +78,17 @@ function NodeDetail({ node, readOnly, onUpdated, onMarkdown }: { node: NodeDto; 
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle'); const dirty = useRef(false); const version = useRef(node.version);
   useEffect(() => { if (!dirty.current || readOnly) return; setSaveState('saving'); const timer = window.setTimeout(async () => { try { const result = await api<{ node: NodeDto }>(`/api/nodes/${node.id}`, { method: 'PATCH', body: JSON.stringify({ title: form.title, status: form.status, startDate: form.startDate || null, endDate: form.endDate || null, summary: form.summary, expectedVersion: version.current }) }); version.current = result.node.version; dirty.current = false; setSaveState('saved'); onUpdated(result.node); } catch (error) { setSaveState('error'); toast.error(error instanceof ApiClientError ? error.message : '自动保存失败'); } }, 500); return () => clearTimeout(timer); }, [form, node.id, onUpdated, readOnly]);
   function change<K extends keyof typeof form>(key: K) { return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => { dirty.current = true; setForm((current) => ({ ...current, [key]: event.target.value })); }; }
+  function setDatesToToday() { const today = localToday(); dirty.current = true; setForm((current) => ({ ...current, startDate: today, endDate: today })); }
+  function extendEndDate(amount: number, unit: DateIncrementUnit) { if (!form.endDate) return; dirty.current = true; setForm((current) => ({ ...current, endDate: addToDateOnly(current.endDate, amount, unit) })); }
   return <div className="node-detail"><div className="panel-heading"><div><span>节点详情</span><small className={`save-state ${saveState}`}>{saveState === 'saving' ? '保存中' : saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : ''}</small></div></div>
     <div className="panel-form"><label>名称<input value={form.title} onChange={change('title')} disabled={readOnly} /></label><label>状态<select value={form.status} onChange={change('status')} disabled={readOnly}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <div className="date-fields"><label>开始日期<input type="date" value={form.startDate} onChange={change('startDate')} disabled={readOnly} /></label><label>结束日期<input type="date" value={form.endDate} onChange={change('endDate')} disabled={readOnly} /></label></div>
+      {!readOnly && <div className="date-shortcuts"><button className="secondary-button today-shortcut" onClick={setDatesToToday}><CalendarDays size={16} />设置起止日期为今天</button><div className="duration-shortcuts">
+        <button className="secondary-button" disabled={!form.endDate} onClick={() => extendEndDate(1, 'day')}>+1天</button>
+        <button className="secondary-button" disabled={!form.endDate} onClick={() => extendEndDate(1, 'week')}>+一周</button>
+        <button className="secondary-button" disabled={!form.endDate} onClick={() => extendEndDate(1, 'month')}>+一个月</button>
+        <button className="secondary-button" disabled={!form.endDate} onClick={() => extendEndDate(3, 'month')}>+三个月</button>
+      </div></div>}
       <label>简短说明<textarea rows={5} maxLength={2000} value={form.summary} onChange={change('summary')} disabled={readOnly} /></label>
       <button className="secondary-button full-button" onClick={onMarkdown}><BookOpenText size={17} />{readOnly ? '查看附加信息' : '编辑附加信息'}</button></div>
   </div>;
