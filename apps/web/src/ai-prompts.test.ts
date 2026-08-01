@@ -7,6 +7,8 @@ describe('AI prompt construction', () => {
     expect(prompt).toContain('"steps"');
     expect(prompt).toContain('只有用户想法确实包含某阶段内部的顺序拆解时才使用 steps');
     expect(prompt).toContain('并行、分支、依赖或多层结构应建成普通节点和边');
+    expect(prompt).toContain('从无到有建立子阶段结构时，应形成多个有序部分');
+    expect(prompt).toContain('已有子阶段结构追加、修改、删除或重排时，可以只操作一项');
   });
 
   it('builds a deterministic v2 snapshot prompt without internal ids', () => {
@@ -56,6 +58,17 @@ describe('AI prompt construction', () => {
         steps: [{ key: 'step-one', title: '第一步', status: 'completed', startDate: null, endDate: null, summary: '' }] }], edges: [] });
     expect(prompt).toContain('"key": "step-one"');
     expect(prompt).toContain('子阶段 key 必须来自该节点上下文或本次 addSteps');
+  });
+
+  it('requires complete scope evaluation without forcing every scoped node', () => {
+    const prompt = buildChangeSetPrompt('根据现有内容判断哪些阶段值得细化', { plan: { name: '学习', description: '', status: 'active', graphRevision: 6 },
+      scope: 'all', targetKeys: ['first', 'second'], leafKeys: ['second'], totalNodeCount: 2, leafNodeCount: 1,
+      markdownIncluded: false, markdownBytes: 0, nodes: [], edges: [] });
+    expect(prompt).toContain('操作范围表示哪些现有节点可以被修改，不代表必须修改范围内每一个节点');
+    expect(prompt).toContain('依据上下文从操作范围中判断或筛选目标时，必须逐一评估范围内的全部现有节点');
+    expect(prompt).toContain('不得只选择少数代表性目标');
+    expect(prompt).toContain('最小变更只用于避免无关字段和无关操作，不得用于遗漏满足用户条件的目标');
+    expect(prompt).toContain('已完整评估用户要求判断或筛选的操作范围');
   });
 
   it('includes existing target markdown without exposing picker metadata', () => {
