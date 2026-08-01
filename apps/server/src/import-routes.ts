@@ -9,7 +9,7 @@ import { pick } from 'stream-json/filters/pick.js';
 import { streamArray } from 'stream-json/streamers/stream-array.js';
 import { streamValues } from 'stream-json/streamers/stream-values.js';
 import {
-  PlanChangeSetSchema, type ImportPreviewDto, type ImportSettingsDto,
+  NodeKeySchema, PlanChangeSetSchema, type ImportPreviewDto, type ImportSettingsDto,
   type PlanChangeSet, type PlanSnapshot, type PlanSnapshotEdge, type PlanSnapshotNode
 } from '@sixplan/shared';
 import { z } from 'zod';
@@ -41,8 +41,8 @@ interface SettingsRow {
   updated_at: string;
 }
 
-const PromptScopeSchema = z.enum(['all','leaves']);
-type PromptScope = z.infer<typeof PromptScopeSchema>;
+const PromptTargetKeysSchema = z.array(NodeKeySchema).min(1).max(50_000)
+  .refine((keys) => new Set(keys).size === keys.length, '操作范围不能包含重复节点');
 
 const activeByUser = new Map<string, number>();
 let activeGlobal = 0;
@@ -217,12 +217,11 @@ function snapshotPreview(snapshot: PlanSnapshot, sessionId: string, expiresAt: s
   };
 }
 
-function validatePromptScope(app: FastifyInstance, planId: string, changeSet: PlanChangeSet, scope?: PromptScope): void {
-  if (!scope) return;
-  const nodes = app.database.sqlite.prepare('SELECT id,node_key FROM nodes WHERE plan_id=?').all(planId) as Array<{ id: string; node_key: string }>;
-  const edges = app.database.sqlite.prepare('SELECT source_node_id FROM edges WHERE plan_id=?').all(planId) as Array<{ source_node_id: string }>;
-  const sourceIds = new Set(edges.map((edge) => edge.source_node_id));
-  const allowedKeys = new Set(scope === 'all' ? nodes.map((node) => node.node_key) : nodes.filter((node) => !sourceIds.has(node.id)).map((node) => node.node_key));
+function validatePromptTargets(app: FastifyInstance, planId: string, changeSet: PlanChangeSet, targetKeys?: string[]): void {
+  if (!targetKeys) return;
+  const knownKeys = new Set((app.database.sqlite.prepare('SELECT node_key FROM nodes WHERE plan_id=?').all(planId) as Array<{ node_key: string }>).map((node) => node.node_key));
+  const allowedKeys = new Set(targetKeys);
+  for (const key of allowedKeys) if (!knownKeys.has(key)) throw new AppError(400, 'PROMPT_TARGET_NOT_FOUND', `操作范围中的节点不存在：${key}`);
   const operations = changeSet.operations;
   for (const key of [...operations.updateNodes.map((operation) => operation.key), ...operations.removeNodes]) {
     if (!allowedKeys.has(key)) throw new AppError(400, 'PROMPT_SCOPE_VIOLATION', `模型修改了操作范围外的节点：${key}`);
@@ -231,6 +230,34 @@ function validatePromptScope(app: FastifyInstance, planId: string, changeSet: Pl
   for (const edge of [...operations.addEdges, ...operations.removeEdges]) for (const key of [edge.source, edge.target]) {
     if (!addedKeys.has(key) && !allowedKeys.has(key)) throw new AppError(400, 'PROMPT_SCOPE_VIOLATION', `模型操作的连接引用了范围外节点：${key}`);
   }
+}
+
+function promptContext(app: FastifyInstance, userId: string, planId: string, targetKeys: string[] | undefined, includeMarkdown: boolean) {
+  const plan = getPlan(app, userId, planId);
+  const nodes = app.database.sqlite.prepare('SELECT * FROM nodes WHERE plan_id=? ORDER BY created_at').all(planId) as NodeRow[];
+  const edges = app.database.sqlite.prepare('SELECT * FROM edges WHERE plan_id=? ORDER BY created_at').all(planId) as EdgeRow[];
+  const keyById = new Map(nodes.map((node) => [node.id, node.node_key]));
+  const knownKeys = new Set(nodes.map((node) => node.node_key));
+  const targets = new Set(targetKeys ?? nodes.map((node) => node.node_key));
+  for (const key of targets) if (!knownKeys.has(key)) throw new AppError(400, 'PROMPT_TARGET_NOT_FOUND', `操作范围中的节点不存在：${key}`);
+  const sourceKeys = new Set(edges.map((edge) => keyById.get(edge.source_node_id)!));
+  const leafKeys = nodes.filter((node) => !sourceKeys.has(node.node_key)).map((node) => node.node_key);
+  const included = new Set(targets);
+  for (const edge of edges) {
+    const source = keyById.get(edge.source_node_id)!; const target = keyById.get(edge.target_node_id)!;
+    if (targets.has(source) || targets.has(target)) { included.add(source); included.add(target); }
+  }
+  const sameKeys = (values: string[]) => values.length === targets.size && values.every((key) => targets.has(key));
+  const scope = sameKeys(nodes.map((node) => node.node_key)) ? 'all' : sameKeys(leafKeys) ? 'leaves' : 'custom';
+  const markdownBytes = nodes.filter((node) => targets.has(node.node_key)).reduce((total, node) => total + Buffer.byteLength(node.extra_content, 'utf8'), 0);
+  return { plan: { name: plan.name, description: plan.description, status: plan.status, graphRevision: plan.graph_revision },
+    scope, targetKeys: nodes.filter((node) => targets.has(node.node_key)).map((node) => node.node_key), leafKeys,
+    totalNodeCount: nodes.length, leafNodeCount: leafKeys.length, markdownIncluded: includeMarkdown, markdownBytes,
+    nodes: nodes.filter((node) => included.has(node.node_key)).map((node) => ({ key: node.node_key, title: node.title, status: node.status,
+      startDate: node.start_date, endDate: node.end_date, summary: node.summary, position: { x: node.position_x, y: node.position_y },
+      markdownBytes: Buffer.byteLength(node.extra_content, 'utf8'), ...(includeMarkdown && targets.has(node.node_key) ? { markdown: node.extra_content } : {}) })),
+    edges: edges.map((edge) => ({ source: keyById.get(edge.source_node_id)!, target: keyById.get(edge.target_node_id)! }))
+      .filter((edge) => included.has(edge.source) && included.has(edge.target)) };
 }
 
 async function previewSession(app: FastifyInstance, row: SessionRow): Promise<ImportPreviewDto> {
@@ -248,13 +275,13 @@ function getSession(app: FastifyInstance, userId: string, id: string): SessionRo
   return row;
 }
 
-async function createSession(app: FastifyInstance, userId: string, filePath: string, sourceName: string, targetPlanId?: string, promptScope?: PromptScope): Promise<ImportPreviewDto> {
+async function createSession(app: FastifyInstance, userId: string, filePath: string, sourceName: string, targetPlanId?: string, promptTargetKeys?: string[]): Promise<ImportPreviewDto> {
   const value = await parseFile(filePath); const limits = effectiveLimits(app, userId);
   validateLimits(app, userId, value, statSync(filePath).size);
   if (value.format === 'sixplan-plan-changeset' && !targetPlanId) throw new AppError(400, 'TARGET_PLAN_REQUIRED', '增量文件需要选择目标计划');
   if (value.format === 'sixplan-plan-snapshot' && targetPlanId) throw new AppError(400, 'TARGET_PLAN_NOT_ALLOWED', '全新计划快照不能指定目标计划');
   if (targetPlanId) getPlan(app, userId, targetPlanId);
-  if (value.format === 'sixplan-plan-changeset') validatePromptScope(app, targetPlanId!, value, promptScope);
+  if (value.format === 'sixplan-plan-changeset') validatePromptTargets(app, targetPlanId!, value, promptTargetKeys);
   const id = randomUUID(); const createdAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + limits.sessionHours * 60 * 60 * 1000).toISOString();
   app.database.sqlite.prepare(`INSERT INTO import_sessions
@@ -292,32 +319,40 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
   app.post('/api/import-sessions/json', async (request) => withImportSlot(app, request.currentUser!.id, async () => {
     cleanupExpired(app);
     const body = z.object({ content: z.union([z.string(), z.record(z.unknown())]), targetPlanId: z.string().uuid().optional(), sourceName: z.string().max(255).optional(),
-      promptScope: PromptScopeSchema.optional() }).parse(request.body);
+      promptTargetKeys: PromptTargetKeysSchema.optional() }).parse(request.body);
     const text = typeof body.content === 'string' ? body.content : JSON.stringify(body.content);
     const limits = effectiveLimits(app, request.currentUser!.id); const size = Buffer.byteLength(text);
     if (size > limits.fileBytes) throw new AppError(413, 'IMPORT_FILE_TOO_LARGE', `内容超过 ${limits.fileBytes} 字节限制`);
     if (userTempBytes(app, request.currentUser!.id) + size > limits.tempBytes) throw new AppError(413, 'IMPORT_TEMP_LIMIT', '临时导入空间不足，请删除旧会话后重试');
     const directory = join(app.config.importDir ?? app.config.dataDir, request.currentUser!.id); await mkdir(directory, { recursive: true });
     const filePath = join(directory, `${randomUUID()}.json`); await writeFile(filePath, text, 'utf8');
-    try { return { preview: await createSession(app, request.currentUser!.id, filePath, body.sourceName ?? 'pasted.json', body.targetPlanId, body.promptScope) }; }
+    try { return { preview: await createSession(app, request.currentUser!.id, filePath, body.sourceName ?? 'pasted.json', body.targetPlanId, body.promptTargetKeys) }; }
     catch (error) { if (existsSync(filePath)) unlinkSync(filePath); throw error; }
   }));
 
   app.post('/api/import-sessions/upload', async (request) => withImportSlot(app, request.currentUser!.id, async () => {
     cleanupExpired(app);
-    const query = z.object({ targetPlanId: z.string().uuid().optional(), scope: PromptScopeSchema.optional() }).parse(request.query);
+    const query = z.object({ targetPlanId: z.string().uuid().optional() }).parse(request.query);
     const limits = effectiveLimits(app, request.currentUser!.id);
-    const part = await request.file({ limits: { fileSize: limits.fileBytes, files: 1 } });
-    if (!part) throw new AppError(400, 'IMPORT_FILE_REQUIRED', '请选择 JSON 文件');
     const directory = join(app.config.importDir ?? app.config.dataDir, request.currentUser!.id); await mkdir(directory, { recursive: true });
-    const filePath = join(directory, `${randomUUID()}.json`);
+    let filePath: string | undefined; let sourceName = 'uploaded.json'; let promptTargetKeys: string[] | undefined;
     try {
-      await pipeline(part.file, createWriteStream(filePath, { flags: 'wx' }));
-      if (part.file.truncated) throw new AppError(413, 'IMPORT_FILE_TOO_LARGE', `文件超过 ${limits.fileBytes} 字节限制`);
+      for await (const part of request.parts({ limits: { fileSize: limits.fileBytes, files: 1, fields: 1, parts: 2 } })) {
+        if (part.type === 'file') {
+          if (part.fieldname !== 'file' || filePath) { part.file.resume(); throw new AppError(400, 'IMPORT_FILE_REQUIRED', '只能上传一个 JSON 文件'); }
+          filePath = join(directory, `${randomUUID()}.json`); sourceName = part.filename;
+          await pipeline(part.file, createWriteStream(filePath, { flags: 'wx' }));
+          if (part.file.truncated) throw new AppError(413, 'IMPORT_FILE_TOO_LARGE', `文件超过 ${limits.fileBytes} 字节限制`);
+        } else if (part.fieldname === 'promptTargetKeys') {
+          try { promptTargetKeys = PromptTargetKeysSchema.parse(JSON.parse(String(part.value))); }
+          catch { throw new AppError(400, 'PROMPT_TARGETS_INVALID', '提示词操作范围格式无效'); }
+        } else throw new AppError(400, 'UNKNOWN_FIELD', `未知上传字段：${part.fieldname}`);
+      }
+      if (!filePath) throw new AppError(400, 'IMPORT_FILE_REQUIRED', '请选择 JSON 文件');
       const size = statSync(filePath).size;
       if (userTempBytes(app, request.currentUser!.id) + size > limits.tempBytes) throw new AppError(413, 'IMPORT_TEMP_LIMIT', '临时导入空间不足，请删除旧会话后重试');
-      return { preview: await createSession(app, request.currentUser!.id, filePath, part.filename, query.targetPlanId, query.scope) };
-    } catch (error) { if (existsSync(filePath)) unlinkSync(filePath); throw error; }
+      return { preview: await createSession(app, request.currentUser!.id, filePath, sourceName, query.targetPlanId, promptTargetKeys) };
+    } catch (error) { if (filePath && existsSync(filePath)) unlinkSync(filePath); throw error; }
   }));
 
   app.get('/api/import-sessions/:id', async (request) => withImportSlot(app, request.currentUser!.id, async () => {
@@ -355,24 +390,12 @@ export async function registerImportRoutes(app: FastifyInstance): Promise<void> 
 
   app.get('/api/plans/:id/prompt-context', async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const query = z.object({ scope: z.enum(['all','leaves']).default('all') }).parse(request.query);
-    const plan = getPlan(app, request.currentUser!.id, id);
-    const nodes = app.database.sqlite.prepare('SELECT * FROM nodes WHERE plan_id=? ORDER BY created_at').all(id) as NodeRow[];
-    const edges = app.database.sqlite.prepare('SELECT * FROM edges WHERE plan_id=? ORDER BY created_at').all(id) as EdgeRow[];
-    const keyById = new Map(nodes.map((node) => [node.id, node.node_key]));
-    const sourceKeys = new Set(edges.map((edge) => keyById.get(edge.source_node_id)!));
-    const leafKeys = nodes.filter((node) => !sourceKeys.has(node.node_key)).map((node) => node.node_key);
-    const targetKeys = query.scope === 'all' ? nodes.map((node) => node.node_key) : leafKeys;
-    const included = new Set(targetKeys);
-    if (query.scope === 'leaves') for (const edge of edges) {
-      const source = keyById.get(edge.source_node_id)!; const target = keyById.get(edge.target_node_id)!;
-      if (included.has(target)) included.add(source);
-    }
-    return { context: { plan: { name: plan.name, description: plan.description, status: plan.status, graphRevision: plan.graph_revision },
-      scope: query.scope, targetKeys, totalNodeCount: nodes.length, leafNodeCount: leafKeys.length,
-      nodes: nodes.filter((node) => included.has(node.node_key)).map((node) => ({ key: node.node_key, title: node.title, status: node.status,
-        startDate: node.start_date, endDate: node.end_date, summary: node.summary })),
-      edges: edges.map((edge) => ({ source: keyById.get(edge.source_node_id)!, target: keyById.get(edge.target_node_id)! }))
-        .filter((edge) => included.has(edge.source) && included.has(edge.target)) } };
+    return { context: promptContext(app, request.currentUser!.id, id, undefined, false) };
+  });
+
+  app.post('/api/plans/:id/prompt-context', async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z.object({ targetKeys: PromptTargetKeysSchema, includeMarkdown: z.boolean().default(false) }).strict().parse(request.body);
+    return { context: promptContext(app, request.currentUser!.id, id, body.targetKeys, body.includeMarkdown) };
   });
 }

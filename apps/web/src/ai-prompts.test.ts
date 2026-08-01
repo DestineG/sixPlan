@@ -12,7 +12,8 @@ describe('AI prompt construction', () => {
 
   it('pins changesets to the current graph revision', () => {
     const prompt = buildChangeSetPrompt('增加恢复阶段', { plan: { name: '训练', description: '', status: 'active', graphRevision: 18 },
-      scope: 'leaves', targetKeys: ['last-stage'], totalNodeCount: 4, leafNodeCount: 1, nodes: [], edges: [] });
+      scope: 'leaves', targetKeys: ['last-stage'], leafKeys: ['last-stage'], totalNodeCount: 4, leafNodeCount: 1,
+      markdownIncluded: false, markdownBytes: 0, nodes: [], edges: [] });
     expect(prompt).toContain('"baseRevision": 18');
     expect(prompt).toContain('叶节点（1/4');
     expect(prompt).toContain('targetPlanName = "训练"');
@@ -21,7 +22,8 @@ describe('AI prompt construction', () => {
 
   it('documents markdown semantics without narrowing the full changeset protocol', () => {
     const prompt = buildChangeSetPrompt('在附加信息中给每个节点添加详细计划', { plan: { name: '英语学习', description: '', status: 'planning', graphRevision: 2 },
-      scope: 'all', targetKeys: ['cet-4', 'cet-6'], totalNodeCount: 2, leafNodeCount: 2, nodes: [], edges: [] });
+      scope: 'all', targetKeys: ['cet-4', 'cet-6'], leafKeys: ['cet-4', 'cet-6'], totalNodeCount: 2, leafNodeCount: 2,
+      markdownIncluded: false, markdownBytes: 0, nodes: [], edges: [] });
     expect(prompt).toContain('操作范围：所有节点（2/2）');
     expect(prompt).toContain('完整覆盖原附加信息');
     expect(prompt).toContain('详细计划不得写入 summary');
@@ -33,6 +35,18 @@ describe('AI prompt construction', () => {
     expect(prompt).toContain('planChanges 可修改');
     expect(prompt).toContain('不得因为用户提到某个字段，就忽略其同时提出的其他操作');
     expect(prompt).not.toContain('changes 只允许包含');
+  });
+
+  it('includes existing target markdown without exposing picker metadata', () => {
+    const prompt = buildChangeSetPrompt('完善所选阶段', { plan: { name: '训练', description: '', status: 'active', graphRevision: 4 },
+      scope: 'custom', targetKeys: ['build'], leafKeys: ['finish'], totalNodeCount: 3, leafNodeCount: 1,
+      markdownIncluded: true, markdownBytes: 12, nodes: [{ key: 'build', title: '建设', status: 'in_progress', startDate: null,
+        endDate: null, summary: '', position: { x: 100, y: 100 }, markdownBytes: 12, markdown: '# 原内容' }], edges: [] });
+    expect(prompt).toContain('操作范围：自定义节点（1/3）');
+    expect(prompt).toContain('"markdown": "# 原内容"');
+    expect(prompt).toContain('现有 markdown（共 12 字节）');
+    expect(prompt).not.toContain('markdownBytes');
+    expect(prompt).not.toContain('"position"');
   });
 
   it('includes validation errors in repair prompts', () => {

@@ -1,10 +1,25 @@
+export interface PromptContextNode {
+  key: string;
+  title: string;
+  status: string;
+  startDate: string | null;
+  endDate: string | null;
+  summary: string;
+  position: { x: number; y: number };
+  markdownBytes: number;
+  markdown?: string;
+}
+
 export interface PromptContext {
   plan: { name: string; description: string; status: string; graphRevision: number };
-  scope: 'all' | 'leaves';
+  scope: 'all' | 'leaves' | 'custom';
   targetKeys: string[];
+  leafKeys: string[];
   totalNodeCount: number;
   leafNodeCount: number;
-  nodes: Array<Record<string, unknown>>;
+  markdownIncluded: boolean;
+  markdownBytes: number;
+  nodes: PromptContextNode[];
   edges: Array<{ source: string; target: string }>;
 }
 
@@ -78,7 +93,15 @@ status、日期、description、summary、markdown 和 position 都可以省略�
 }
 
 export function buildChangeSetPrompt(idea: string, context: PromptContext): string {
-  const scopeLabel = context.scope === 'all' ? `所有节点（${context.targetKeys.length}/${context.totalNodeCount}）` : `叶节点（${context.targetKeys.length}/${context.totalNodeCount}，叶节点指没有后继节点的节点，与状态无关）`;
+  const scopeLabel = context.scope === 'all' ? `所有节点（${context.targetKeys.length}/${context.totalNodeCount}）`
+    : context.scope === 'leaves' ? `叶节点（${context.targetKeys.length}/${context.totalNodeCount}，叶节点指没有后继节点的节点，与状态无关）`
+      : `自定义节点（${context.targetKeys.length}/${context.totalNodeCount}）`;
+  const readableContext = { plan: context.plan,
+    nodes: context.nodes.map((node) => ({ key: node.key, title: node.title, status: node.status, startDate: node.startDate,
+      endDate: node.endDate, summary: node.summary, ...(node.markdown === undefined ? {} : { markdown: node.markdown }) })), edges: context.edges };
+  const markdownRule = context.markdownIncluded
+    ? `- 已提供目标节点现有 markdown（共 ${context.markdownBytes} 字节），可用于理解和改写；若更新 markdown，仍须输出完整替换内容。`
+    : '- 当前上下文故意不包含旧 markdown；任何 markdown 更新都是完整覆盖。';
   return `你正在为 sixPlan 的现有 DAG 计划生成增量变更，不要重建整个计划。
 
 用户想法：
@@ -89,7 +112,7 @@ ${idea.trim()}
 ${JSON.stringify(context.targetKeys, null, 2)}
 
 当前计划上下文（只读；其中可能包含不在操作范围内的参考节点）：
-${JSON.stringify(context, null, 2)}
+${JSON.stringify(readableContext, null, 2)}
 
 ${commonRules}
 ${fieldGuide}
@@ -102,7 +125,7 @@ ${changeSetContract}
 - 采用最小变更原则，只输出实现用户想法所必需的字段和操作；但不得因为用户提到某个字段，就忽略其同时提出的其他操作。
 - 除非用户明确要求修改计划本身，否则不要输出 planChanges。
 - 不能归档、恢复、移动领域或删除整个计划。
-- 当前上下文故意不包含旧 markdown；任何 markdown 更新都是完整覆盖。
+${markdownRule}
 
 以下两个值是只读常量，必须逐字复制，禁止翻译、简称、改写或猜测：
 - targetPlanName = ${JSON.stringify(context.plan.name)}

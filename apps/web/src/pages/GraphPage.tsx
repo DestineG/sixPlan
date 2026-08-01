@@ -8,6 +8,7 @@ import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { nodeStatusLabels, type EdgeDto, type GraphDto, type NodeDto } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile } from '../api';
+import { copyText } from '../clipboard';
 import { PlanNodeCard, type PlanNodeData } from '../components/PlanNodeCard';
 import { addToDateOnly, localToday, type DateIncrementUnit } from '../date-utils';
 
@@ -82,7 +83,7 @@ function NodeDetail({ node, readOnly, onUpdated, onMarkdown }: { node: NodeDto; 
   function setDatesToToday() { const today = localToday(); dirty.current = true; setForm((current) => ({ ...current, startDate: today, endDate: today })); }
   function extendEndDate(amount: number, unit: DateIncrementUnit) { if (!form.endDate) return; dirty.current = true; setForm((current) => ({ ...current, endDate: addToDateOnly(current.endDate, amount, unit) })); }
   return <div className="node-detail"><div className="panel-heading"><div><span>节点详情</span><small className={`save-state ${saveState}`}>{saveState === 'saving' ? '保存中' : saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : ''}</small></div></div>
-    <div className="panel-form"><label>节点 key<div className="key-copy-row"><code>{node.key}</code><button className="icon-button" title="复制节点 key" onClick={() => navigator.clipboard.writeText(node.key).then(() => toast.success('节点 key 已复制'))}><Copy size={15} /></button></div></label><label>名称<input value={form.title} onChange={change('title')} disabled={readOnly} /></label><label>状态<select value={form.status} onChange={change('status')} disabled={readOnly}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+    <div className="panel-form"><label>节点 key<div className="key-copy-row"><code>{node.key}</code><button className="icon-button" title="复制节点 key" onClick={() => copyText(node.key).then(() => toast.success('节点 key 已复制')).catch(() => toast.error('复制失败'))}><Copy size={15} /></button></div></label><label>名称<input value={form.title} onChange={change('title')} disabled={readOnly} /></label><label>状态<select value={form.status} onChange={change('status')} disabled={readOnly}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <div className="date-fields"><label>开始日期<input type="date" value={form.startDate} onChange={change('startDate')} disabled={readOnly} /></label><label>结束日期<input type="date" value={form.endDate} onChange={change('endDate')} disabled={readOnly} /></label></div>
       {!readOnly && <div className="date-shortcuts"><button className="secondary-button today-shortcut" onClick={setDatesToToday}><CalendarDays size={16} />设置起止日期为今天</button><div className="duration-shortcuts">
         <button className="secondary-button" disabled={!form.endDate} onClick={() => extendEndDate(1, 'day')}>+1天</button>

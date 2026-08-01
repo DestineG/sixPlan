@@ -178,22 +178,37 @@ describe('sixPlan API', () => {
     const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '英语学习' })).json<{ plan: PlanDto }>().plan;
     const cet4 = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '四级', positionX: 100, positionY: 100 })).json<{ node: NodeDto }>().node;
     const cet6 = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '六级', positionX: 400, positionY: 100 })).json<{ node: NodeDto }>().node;
+    const vocabulary = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '词汇积累', positionX: 100, positionY: 300 })).json<{ node: NodeDto }>().node;
     await request(cookie, 'POST', `/api/plans/${plan.id}/edges`, { sourceNodeId: cet4.id, targetNodeId: cet6.id });
     const updatedCet6 = (await request(cookie, 'PATCH', `/api/nodes/${cet6.id}`, { extraContent: '旧内容', expectedVersion: cet6.version })).json<{ node: NodeDto }>().node;
-    const allContext = (await request(cookie, 'GET', `/api/plans/${plan.id}/prompt-context`)).json<{ context: { scope: string; targetKeys: string[]; totalNodeCount: number; leafNodeCount: number } }>().context;
-    expect(allContext).toMatchObject({ scope: 'all', totalNodeCount: 2, leafNodeCount: 1 });
-    expect(allContext.targetKeys).toEqual([cet4.key, cet6.key]);
-    const leafContext = (await request(cookie, 'GET', `/api/plans/${plan.id}/prompt-context?scope=leaves`)).json<{ context: { targetKeys: string[]; nodes: Array<{ key: string; markdown?: string }> } }>().context;
-    expect(leafContext.targetKeys).toEqual([cet6.key]); expect(leafContext.nodes.map((node) => node.key)).toEqual([cet4.key, cet6.key]);
-    expect(leafContext.nodes.every((node) => !('markdown' in node))).toBe(true);
+    const allContext = (await request(cookie, 'GET', `/api/plans/${plan.id}/prompt-context`)).json<{ context: { scope: string; targetKeys: string[];
+      leafKeys: string[]; totalNodeCount: number; leafNodeCount: number; nodes: Array<{ key: string; markdown?: string; markdownBytes: number }> } }>().context;
+    expect(allContext).toMatchObject({ scope: 'all', totalNodeCount: 3, leafNodeCount: 2 });
+    expect(allContext.targetKeys).toEqual([cet4.key, cet6.key, vocabulary.key]); expect(allContext.leafKeys).toEqual([cet6.key, vocabulary.key]);
+    expect(allContext.nodes.every((node) => !('markdown' in node))).toBe(true);
+    const customContext = (await request(cookie, 'POST', `/api/plans/${plan.id}/prompt-context`, {
+      targetKeys: [cet6.key], includeMarkdown: true
+    })).json<{ context: { scope: string; targetKeys: string[]; markdownBytes: number; nodes: Array<{ key: string; markdown?: string }> } }>().context;
+    expect(customContext).toMatchObject({ scope: 'custom', targetKeys: [cet6.key], markdownBytes: Buffer.byteLength('旧内容') });
+    expect(customContext.nodes.map((node) => node.key)).toEqual([cet4.key, cet6.key]);
+    expect(customContext.nodes.find((node) => node.key === cet6.key)?.markdown).toBe('旧内容');
+    expect(customContext.nodes.find((node) => node.key === cet4.key)).not.toHaveProperty('markdown');
 
     const current = (await request(cookie, 'GET', `/api/plans/${plan.id}`)).json<{ plan: PlanDto }>().plan;
-    const outsideScope = await request(cookie, 'POST', '/api/import-sessions/json', { targetPlanId: plan.id, promptScope: 'leaves',
+    const outsideScope = await request(cookie, 'POST', '/api/import-sessions/json', { targetPlanId: plan.id, promptTargetKeys: [cet6.key],
       content: { format: 'sixplan-plan-changeset', version: 2, targetPlanName: plan.name, baseRevision: current.graphRevision,
         operations: { updateNodes: [{ key: cet4.key, changes: { markdown: '# 四级新计划' } }] } } });
     expect(outsideScope.statusCode).toBe(400); expect(outsideScope.json()).toMatchObject({ code: 'PROMPT_SCOPE_VIOLATION' });
 
-    const combined = await request(cookie, 'POST', '/api/import-sessions/json', { targetPlanId: plan.id, promptScope: 'leaves',
+    const boundary = 'sixplan-prompt-targets';
+    const uploadJson = JSON.stringify({ format: 'sixplan-plan-changeset', version: 2, targetPlanName: plan.name, baseRevision: current.graphRevision,
+      operations: { updateNodes: [{ key: cet4.key, changes: { summary: '范围外修改' } }] } });
+    const multipartBody = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="promptTargetKeys"\r\n\r\n${JSON.stringify([cet6.key])}\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="custom.changeset.json"\r\nContent-Type: application/json\r\n\r\n${uploadJson}\r\n--${boundary}--\r\n`);
+    const uploadedOutsideScope = await app.inject({ method: 'POST', url: `/api/import-sessions/upload?targetPlanId=${plan.id}`,
+      headers: { cookie, 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: multipartBody });
+    expect(uploadedOutsideScope.statusCode).toBe(400); expect(uploadedOutsideScope.json()).toMatchObject({ code: 'PROMPT_SCOPE_VIOLATION' });
+
+    const combined = await request(cookie, 'POST', '/api/import-sessions/json', { targetPlanId: plan.id, promptTargetKeys: [cet6.key],
       content: { format: 'sixplan-plan-changeset', version: 2, targetPlanName: plan.name, baseRevision: current.graphRevision,
         planChanges: { description: '长期英语学习计划' }, operations: {
           addNodes: [{ key: 'review-stage', title: '复盘阶段' }],
