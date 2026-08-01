@@ -75,6 +75,34 @@ describe('sixPlan API', () => {
     expect(areas.find((area) => area.id === life.id)).toMatchObject({ planCount: 0, activePlanCount: 0, archivedPlanCount: 1 });
   });
 
+  it('reconciles date-managed node statuses without overwriting manual statuses', async () => {
+    const cookie = await register('date-status-user');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: '日程' })).json<{ area: AreaDto }>().area;
+    const plan = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '按日期推进' })).json<{ plan: PlanDto }>().plan;
+    const future = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '未来节点', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const past = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '已开始节点', positionX: 200, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const noStart = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '未定节点', positionX: 400, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const manual = (await request(cookie, 'POST', `/api/plans/${plan.id}/nodes`, { title: '人工完成', positionX: 600, positionY: 0 })).json<{ node: NodeDto }>().node;
+    await request(cookie, 'PATCH', `/api/nodes/${future.id}`, { status: 'in_progress', startDate: '2026-08-02', expectedVersion: future.version });
+    await request(cookie, 'PATCH', `/api/nodes/${past.id}`, { startDate: '2026-07-31', endDate: '2026-07-31', expectedVersion: past.version });
+    await request(cookie, 'PATCH', `/api/nodes/${noStart.id}`, { status: 'in_progress', expectedVersion: noStart.version });
+    await request(cookie, 'PATCH', `/api/nodes/${manual.id}`, { status: 'completed', startDate: '2026-07-01', expectedVersion: manual.version });
+
+    const reconciled = await request(cookie, 'POST', `/api/plans/${plan.id}/nodes/reconcile-statuses`, { today: '2026-08-01' });
+    expect(reconciled.statusCode).toBe(200);
+    expect(reconciled.json<{ nodes: NodeDto[] }>().nodes).toHaveLength(3);
+    const graph = (await request(cookie, 'GET', `/api/plans/${plan.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(graph.nodes.find((node) => node.id === future.id)?.status).toBe('not_started');
+    expect(graph.nodes.find((node) => node.id === past.id)?.status).toBe('in_progress');
+    expect(graph.nodes.find((node) => node.id === noStart.id)?.status).toBe('not_started');
+    expect(graph.nodes.find((node) => node.id === manual.id)?.status).toBe('completed');
+    expect(graph.plan.status).toBe('planning');
+
+    await request(cookie, 'POST', `/api/plans/${plan.id}/archive`, { expectedVersion: plan.version });
+    const archived = await request(cookie, 'POST', `/api/plans/${plan.id}/nodes/reconcile-statuses`, { today: '2026-08-02' });
+    expect(archived.statusCode).toBe(409); expect(archived.json()).toMatchObject({ code: 'PLAN_ARCHIVED' });
+  });
+
   it('sets secure cookies only for trusted HTTPS requests and disables storage opening by configuration', async () => {
     const http = await app.inject({ method: 'POST', url: '/api/auth/register', payload: { username: 'http-user', password: 'password123' } });
     expect(String(http.headers['set-cookie'])).not.toMatch(/;\s*Secure/i);

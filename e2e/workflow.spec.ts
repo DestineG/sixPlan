@@ -25,6 +25,19 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('button', { name: /实习准备/ }).click();
   await expect(page.getByRole('heading', { name: '实习准备' })).toBeVisible();
 
+  await expect(page.getByLabel('计划状态')).toHaveValue('active');
+  await page.getByLabel('计划状态').selectOption('paused');
+  await expect(page.getByText('计划状态已更新').last()).toBeVisible();
+  await page.getByTitle('返回计划总览').click();
+  await expect(page.getByText('跨领域汇总 0 个进行中的计划')).toBeVisible();
+  await page.getByRole('button', { name: /全部计划/ }).click();
+  await page.getByRole('button', { name: /实习准备/ }).click();
+  await page.getByLabel('计划状态').selectOption('active');
+  await expect(page.getByText('计划状态已更新').last()).toBeVisible();
+  await page.getByTitle('返回计划总览').click();
+  await expect(page.getByText('跨领域汇总 1 个进行中的计划')).toBeVisible();
+  await page.getByRole('button', { name: /实习准备/ }).click();
+
   await page.getByRole('button', { name: '添加节点' }).click();
   await page.getByRole('button', { name: '添加节点' }).click();
   await expect(page.locator('.graph-node')).toHaveCount(2);
@@ -42,13 +55,13 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   const selectedNodeCard = page.locator('.graph-node').first();
   await selectedNodeCard.click();
   await page.getByLabel('名称').fill('学习推理基础');
-  await page.getByLabel('状态').selectOption('in_progress');
+  await page.getByLabel('简短说明').fill('完成基础知识梳理');
+  await page.getByRole('button', { name: '设置起止日期为今天' }).click();
+  await expect(page.getByLabel('节点状态')).toHaveValue('in_progress');
   await expect(selectedNodeCard).toHaveClass(/status-border-in_progress/);
   await expect(selectedNodeCard).toHaveCSS('border-top-color', 'rgb(59, 120, 191)');
   await expect(selectedNodeCard.locator('.node-status')).toHaveText('进行中');
   await expect(selectedNodeCard.locator('.node-status')).toHaveCSS('background-color', 'rgb(229, 240, 251)');
-  await page.getByLabel('简短说明').fill('完成基础知识梳理');
-  await page.getByRole('button', { name: '设置起止日期为今天' }).click();
   const startDate = await page.getByLabel('开始日期').inputValue();
   const initialEndDate = await page.getByLabel('结束日期').inputValue();
   expect(startDate).toBeTruthy(); expect(initialEndDate).toBe(startDate);
@@ -73,6 +86,7 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('button', { name: /实习准备/ }).click();
   await expect(page.getByText('归档计划为只读状态。恢复后才能继续编辑。')).toBeVisible();
   await expect(page.getByRole('button', { name: '添加节点' })).toHaveCount(0);
+  await expect(page.getByLabel('计划状态')).toHaveCount(0);
   await page.getByTitle('返回计划总览').click();
   await page.getByLabel('计划操作').click();
   await page.getByRole('menuitem', { name: '恢复' }).click();
@@ -99,6 +113,7 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('button', { name: /实习准备/ }).click();
   await expect(page.getByText('移动端只读')).toBeVisible();
   await expect(page.getByRole('button', { name: '添加节点' })).toHaveCount(0);
+  await expect(page.getByLabel('计划状态')).toHaveCount(0);
   await expect(page.locator('.graph-node').first()).toBeVisible();
   await page.locator('.graph-node').first().click();
   await expect(page.getByRole('button', { name: '设置起止日期为今天' })).toHaveCount(0);

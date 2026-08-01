@@ -6,11 +6,11 @@ import dagre from 'dagre';
 import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, CalendarDays, Copy, Download, Plus, Trash2 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { nodeStatusLabels, type EdgeDto, type GraphDto, type NodeDto } from '@sixplan/shared';
+import { nodeStatusLabels, planStatusLabels, type EdgeDto, type GraphDto, type NodeDto, type PlanStatus } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile } from '../api';
 import { copyText } from '../clipboard';
 import { PlanNodeCard, type PlanNodeData } from '../components/PlanNodeCard';
-import { addToDateOnly, localToday, type DateIncrementUnit } from '../date-utils';
+import { addToDateOnly, deriveDateManagedNodeStatus, isNodeOverdue, localToday, type DateIncrementUnit } from '../date-utils';
 
 type FlowNode = Node<PlanNodeData, 'planNode'>;
 type FlowEdge = Edge<{ edge: EdgeDto }>;
@@ -26,31 +26,86 @@ function GraphWorkspace() {
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]); const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null); const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [markdownNode, setMarkdownNode] = useState<NodeDto | null>(null); const [mobile, setMobile] = useState(isMobileViewport);
+  const [statusDate, setStatusDate] = useState(localToday);
+  const [savingPlanStatus, setSavingPlanStatus] = useState<PlanStatus | null>(null);
+  const lastReconciledDay = useRef<string | null>(null);
   const graphQuery = useQuery({ queryKey: ['graph', planId], queryFn: () => api<{ graph: GraphDto }>(`/api/plans/${planId}/graph`), staleTime: 0, refetchOnMount: 'always' });
   useEffect(() => { const media = window.matchMedia('(max-width: 760px)'); const change = () => setMobile(media.matches); media.addEventListener('change', change); return () => media.removeEventListener('change', change); }, []);
   useEffect(() => { if (!graphQuery.data) return; const graph = graphQuery.data.graph;
-    setNodes(graph.nodes.map((node) => ({ id: node.id, type: 'planNode', position: { x: node.positionX, y: node.positionY }, data: { node } })));
+    setNodes(graph.nodes.map((node) => ({ id: node.id, type: 'planNode', position: { x: node.positionX, y: node.positionY }, data: { node, today: statusDate } })));
     setEdges(graph.edges.map((edge) => ({ id: edge.id, source: edge.sourceNodeId, target: edge.targetNodeId, data: { edge }, markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 1.7 } })));
-  }, [graphQuery.data, setEdges, setNodes]);
+  }, [graphQuery.data, setEdges, setNodes, statusDate]);
   useEffect(() => {
     if (nodes.length === 0) return;
     const timer = window.setTimeout(() => flow.fitView({ padding: mobile ? 0.22 : 0.16, duration: 300, maxZoom: 1.15 }), 40);
     return () => clearTimeout(timer);
   }, [flow, mobile, nodes.length]);
-  const graph = graphQuery.data?.graph; const readOnly = Boolean(graph?.plan.archivedAt) || mobile;
+  const graph = graphQuery.data?.graph; const planArchivedAt = graph?.plan.archivedAt; const readOnly = Boolean(planArchivedAt) || mobile;
   const selectedNode = nodes.find((node) => node.id === selectedNodeId)?.data.node;
+
+  useEffect(() => {
+    if (planArchivedAt !== null) return;
+    let disposed = false; let reconciliationInFlight = false; let midnightTimer = 0;
+    lastReconciledDay.current = null;
+    async function reconcileStatuses() {
+      const today = localToday();
+      if (lastReconciledDay.current === today || reconciliationInFlight) return;
+      setStatusDate(today);
+      reconciliationInFlight = true;
+      try {
+        const result = await api<{ nodes: NodeDto[] }>(`/api/plans/${planId}/nodes/reconcile-statuses`, {
+          method: 'POST', body: JSON.stringify({ today })
+        });
+        if (disposed) return;
+        lastReconciledDay.current = today;
+        if (result.nodes.length > 0) {
+          const updated = new Map(result.nodes.map((node) => [node.id, node]));
+          queryClient.setQueryData<{ graph: GraphDto }>(['graph', planId], (current) => current ? {
+            graph: { ...current.graph, nodes: current.graph.nodes.map((node) => updated.get(node.id) ?? node) }
+          } : current);
+        }
+      } catch (error) {
+        if (!disposed) toast.error(error instanceof ApiClientError ? error.message : '节点状态校准失败');
+      } finally {
+        reconciliationInFlight = false;
+      }
+    }
+    function scheduleMidnightCheck() {
+      const now = new Date(); const nextDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1);
+      midnightTimer = window.setTimeout(() => { void reconcileStatuses(); scheduleMidnightCheck(); }, nextDay.getTime() - now.getTime());
+    }
+    function onVisibilityChange() { if (document.visibilityState === 'visible') void reconcileStatuses(); }
+    void reconcileStatuses(); scheduleMidnightCheck(); document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => { disposed = true; window.clearTimeout(midnightTimer); document.removeEventListener('visibilitychange', onVisibilityChange); };
+  }, [planArchivedAt, planId, queryClient]);
 
   function showError(error: unknown) { toast.error(error instanceof ApiClientError ? error.message : '操作失败'); }
   async function refresh() { await queryClient.invalidateQueries({ queryKey: ['graph', planId] }); }
+  async function changePlanStatus(status: PlanStatus) {
+    if (!graph || readOnly || status === graph.plan.status || savingPlanStatus) return;
+    setSavingPlanStatus(status);
+    try {
+      const result = await api<{ plan: GraphDto['plan'] }>(`/api/plans/${planId}`, { method: 'PATCH',
+        body: JSON.stringify({ status, expectedVersion: graph.plan.version }) });
+      queryClient.setQueryData<{ graph: GraphDto }>(['graph', planId], (current) => current ? {
+        graph: { ...current.graph, plan: result.plan }
+      } : current);
+      await Promise.all([queryClient.invalidateQueries({ queryKey: ['areas'] }), queryClient.invalidateQueries({ queryKey: ['plans'] })]);
+      toast.success('计划状态已更新');
+    } catch (error) {
+      showError(error);
+      if (error instanceof ApiClientError && error.status === 409) await refresh();
+    } finally { setSavingPlanStatus(null); }
+  }
   async function addNode() { try { const position = { x: 100 + (nodes.length % 4) * 280, y: 100 + Math.floor(nodes.length / 4) * 190 };
     const { node } = await api<{ node: NodeDto }>(`/api/plans/${planId}/nodes`, { method: 'POST', body: JSON.stringify({ title: '新节点', positionX: position.x, positionY: position.y }) });
-    setNodes((current) => [...current, { id: node.id, type: 'planNode', position, data: { node }, selected: true }]); setSelectedNodeId(node.id); toast.success('节点已添加');
+    setNodes((current) => [...current, { id: node.id, type: 'planNode', position, data: { node, today: statusDate }, selected: true }]); setSelectedNodeId(node.id); toast.success('节点已添加');
   } catch (error) { showError(error); } }
   async function connect(connection: Connection) { if (!connection.source || !connection.target || readOnly) return; try { const { edge } = await api<{ edge: EdgeDto }>(`/api/plans/${planId}/edges`, { method: 'POST', body: JSON.stringify({ sourceNodeId: connection.source, targetNodeId: connection.target }) });
     setEdges((current) => [...current, { id: edge.id, source: edge.sourceNodeId, target: edge.targetNodeId, data: { edge }, markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 1.7 } }]);
   } catch (error) { showError(error); } }
   async function savePosition(node: FlowNode) { try { const result = await api<{ nodes: NodeDto[] }>(`/api/plans/${planId}/nodes/positions`, { method: 'PUT', body: JSON.stringify({ positions: [{ id: node.id, positionX: node.position.x, positionY: node.position.y, expectedVersion: node.data.node.version }] }) }); updateNode(result.nodes[0]!); } catch (error) { showError(error); await refresh(); } }
-  function updateNode(updated: NodeDto) { setNodes((current) => current.map((node) => node.id === updated.id ? { ...node, data: { node: updated } } : node)); if (markdownNode?.id === updated.id) setMarkdownNode(updated); }
+  function updateNode(updated: NodeDto) { setNodes((current) => current.map((node) => node.id === updated.id ? { ...node, data: { ...node.data, node: updated } } : node)); if (markdownNode?.id === updated.id) setMarkdownNode(updated); }
   async function removeSelected() { if (readOnly) return; if (selectedNode) { if (!window.confirm(`删除节点“${selectedNode.title}”及其关联连接？`)) return; try { await api(`/api/nodes/${selectedNode.id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion: selectedNode.version }) }); setSelectedNodeId(null); await refresh(); toast.success('节点已删除'); } catch (error) { showError(error); } return; }
     const edge = edges.find((item) => item.id === selectedEdgeId)?.data?.edge; if (edge) { try { await api(`/api/edges/${edge.id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion: edge.version }) }); setEdges((current) => current.filter((item) => item.id !== edge.id)); setSelectedEdgeId(null); } catch (error) { showError(error); } }
   }
@@ -62,7 +117,7 @@ function GraphWorkspace() {
   if (graphQuery.isLoading) return <div className="page-loader"><span className="spinner" />加载计划图</div>;
   if (!graph) return <div className="error-state">计划图加载失败。<Link to="/">返回总览</Link></div>;
   return <div className="graph-page">
-    <header className="graph-toolbar"><div className="graph-title"><Link className="icon-button" to={graph.plan.archivedAt ? '/?view=archived' : '/'} title="返回计划总览"><ArrowLeft size={18} /></Link><div><span>{graph.plan.areaName}</span><h1>{graph.plan.name}</h1></div>{graph.plan.archivedAt && <span className="archived-badge">已归档</span>}{mobile && <span className="readonly-badge">移动端只读</span>}</div>
+    <header className="graph-toolbar"><div className="graph-title"><Link className="icon-button" to={graph.plan.archivedAt ? '/?view=archived' : '/'} title="返回计划总览"><ArrowLeft size={18} /></Link><div className="graph-title-copy"><span>{graph.plan.areaName}</span><h1>{graph.plan.name}</h1></div>{!readOnly ? <label className="plan-status-control"><span>计划状态</span><select aria-label="计划状态" value={savingPlanStatus ?? graph.plan.status} disabled={Boolean(savingPlanStatus)} onChange={(event) => void changePlanStatus(event.target.value as PlanStatus)}>{Object.entries(planStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : <span className={`status-pill status-${graph.plan.status}`}>{planStatusLabels[graph.plan.status]}</span>}{graph.plan.archivedAt && <span className="archived-badge">已归档</span>}{mobile && <span className="readonly-badge">移动端只读</span>}</div>
       <div className="graph-actions">{!readOnly && <><button className="secondary-button" onClick={addNode}><Plus size={17} />添加节点</button><button className="secondary-button" onClick={layout} disabled={nodes.length === 0}><AlignHorizontalSpaceAround size={17} />自动布局</button><button className="danger-ghost-button" onClick={removeSelected} disabled={!selectedNodeId && !selectedEdgeId}><Trash2 size={17} />删除所选</button></>}<button className="secondary-button" onClick={() => downloadFile(`/api/plans/${planId}/export`).catch(showError)}><Download size={17} />导出</button></div></header>
     {readOnly && <div className="readonly-strip">{graph.plan.archivedAt ? '归档计划为只读状态。恢复后才能继续编辑。' : '移动端提供只读查看，请在桌面浏览器中编辑计划图。'}</div>}
     <div className="graph-body"><section className="graph-canvas"><ReactFlow<FlowNode, FlowEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
@@ -79,11 +134,12 @@ function NodeDetail({ node, readOnly, onUpdated, onMarkdown }: { node: NodeDto; 
   const [form, setForm] = useState({ title: node.title, status: node.status, startDate: node.startDate ?? '', endDate: node.endDate ?? '', summary: node.summary });
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle'); const dirty = useRef(false); const version = useRef(node.version);
   useEffect(() => { if (!dirty.current || readOnly) return; setSaveState('saving'); const timer = window.setTimeout(async () => { try { const result = await api<{ node: NodeDto }>(`/api/nodes/${node.id}`, { method: 'PATCH', body: JSON.stringify({ title: form.title, status: form.status, startDate: form.startDate || null, endDate: form.endDate || null, summary: form.summary, expectedVersion: version.current }) }); version.current = result.node.version; dirty.current = false; setSaveState('saved'); onUpdated(result.node); } catch (error) { setSaveState('error'); toast.error(error instanceof ApiClientError ? error.message : '自动保存失败'); } }, 500); return () => clearTimeout(timer); }, [form, node.id, onUpdated, readOnly]);
-  function change<K extends keyof typeof form>(key: K) { return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => { dirty.current = true; setForm((current) => ({ ...current, [key]: event.target.value })); }; }
-  function setDatesToToday() { const today = localToday(); dirty.current = true; setForm((current) => ({ ...current, startDate: today, endDate: today })); }
-  function extendEndDate(amount: number, unit: DateIncrementUnit) { if (!form.endDate) return; dirty.current = true; setForm((current) => ({ ...current, endDate: addToDateOnly(current.endDate, amount, unit) })); }
+  function change<K extends keyof typeof form>(key: K) { return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => { const value = event.target.value; dirty.current = true; setForm((current) => { const next = { ...current, [key]: value }; if (key === 'status' || key === 'startDate' || key === 'endDate') next.status = deriveDateManagedNodeStatus(next.status, next.startDate || null, localToday()); return next; }); }; }
+  function setDatesToToday() { const today = localToday(); dirty.current = true; setForm((current) => ({ ...current, startDate: today, endDate: today, status: deriveDateManagedNodeStatus(current.status, today, today) })); }
+  function extendEndDate(amount: number, unit: DateIncrementUnit) { if (!form.endDate) return; dirty.current = true; setForm((current) => ({ ...current, endDate: addToDateOnly(current.endDate, amount, unit), status: deriveDateManagedNodeStatus(current.status, current.startDate || null, localToday()) })); }
+  const overdue = isNodeOverdue(form.status, form.endDate || null, localToday());
   return <div className="node-detail"><div className="panel-heading"><div><span>节点详情</span><small className={`save-state ${saveState}`}>{saveState === 'saving' ? '保存中' : saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : ''}</small></div></div>
-    <div className="panel-form"><label>节点 key<div className="key-copy-row"><code>{node.key}</code><button className="icon-button" title="复制节点 key" onClick={() => copyText(node.key).then(() => toast.success('节点 key 已复制')).catch(() => toast.error('复制失败'))}><Copy size={15} /></button></div></label><label>名称<input value={form.title} onChange={change('title')} disabled={readOnly} /></label><label>状态<select value={form.status} onChange={change('status')} disabled={readOnly}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+    <div className="panel-form"><label>节点 key<div className="key-copy-row"><code>{node.key}</code><button className="icon-button" title="复制节点 key" onClick={() => copyText(node.key).then(() => toast.success('节点 key 已复制')).catch(() => toast.error('复制失败'))}><Copy size={15} /></button></div></label><label>名称<input value={form.title} onChange={change('title')} disabled={readOnly} /></label><label>节点状态<div className="node-status-field"><select value={form.status} onChange={change('status')} disabled={readOnly}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{overdue && <span className="overdue-badge">已逾期</span>}</div></label>
       <div className="date-fields"><label>开始日期<input type="date" value={form.startDate} onChange={change('startDate')} disabled={readOnly} /></label><label>结束日期<input type="date" value={form.endDate} onChange={change('endDate')} disabled={readOnly} /></label></div>
       {!readOnly && <div className="date-shortcuts"><button className="secondary-button today-shortcut" onClick={setDatesToToday}><CalendarDays size={16} />设置起止日期为今天</button><div className="duration-shortcuts">
         <button className="secondary-button" disabled={!form.endDate} onClick={() => extendEndDate(1, 'day')}>+1天</button>

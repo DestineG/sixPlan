@@ -15,6 +15,15 @@ export type PlanStatus = z.infer<typeof PlanStatusSchema>;
 export type NodeStatus = z.infer<typeof NodeStatusSchema>;
 export type UserRole = z.infer<typeof UserRoleSchema>;
 
+export function deriveDateManagedNodeStatus(status: NodeStatus, startDate: string | null, today: string): NodeStatus {
+  if (status !== 'not_started' && status !== 'in_progress') return status;
+  return startDate && startDate <= today ? 'in_progress' : 'not_started';
+}
+
+export function isNodeOverdue(status: NodeStatus, endDate: string | null, today: string): boolean {
+  return status === 'in_progress' && Boolean(endDate && endDate < today);
+}
+
 export interface ApiError {
   code: string;
   message: string;

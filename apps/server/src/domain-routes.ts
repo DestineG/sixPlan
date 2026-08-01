@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { NODE_STATUSES, PLAN_STATUSES, type GraphDto } from '@sixplan/shared';
+import { deriveDateManagedNodeStatus, NODE_STATUSES, PLAN_STATUSES, type GraphDto } from '@sixplan/shared';
 import { z } from 'zod';
 import { requireReadyUser } from './auth.js';
 import { AppError } from './errors.js';
@@ -15,6 +15,7 @@ const planParams = z.object({ planId: z.string().uuid() });
 const nodeParams = z.object({ nodeId: z.string().uuid() });
 const edgeParams = z.object({ edgeId: z.string().uuid() });
 const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable();
+const requiredDateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 function validateDates(startDate: string | null, endDate: string | null): void {
   if (startDate && endDate && endDate < startDate) throw new AppError(400, 'INVALID_DATE_RANGE', '结束日期不得早于开始日期');
@@ -189,6 +190,23 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const edgeRows = app.database.sqlite.prepare('SELECT * FROM edges WHERE plan_id = ? ORDER BY created_at').all(planId) as EdgeRow[];
     const graph: GraphDto = { plan: mapPlan(plan), nodes: nodeRows.map(mapNode), edges: edgeRows.map(mapEdge) };
     return { graph };
+  });
+
+  app.post('/api/plans/:planId/nodes/reconcile-statuses', async (request) => {
+    const { planId } = planParams.parse(request.params);
+    const { today } = z.object({ today: requiredDateOnly }).parse(request.body);
+    const plan = getPlan(app, request.currentUser!.id, planId); ensureEditable(plan);
+    const rows = app.database.sqlite.prepare("SELECT * FROM nodes WHERE plan_id = ? AND status IN ('not_started', 'in_progress') ORDER BY created_at")
+      .all(planId) as NodeRow[];
+    const changed = rows.filter((row) => deriveDateManagedNodeStatus(row.status, row.start_date, today) !== row.status);
+    if (changed.length === 0) return { nodes: [] };
+    const now = new Date().toISOString();
+    const update = app.database.sqlite.prepare('UPDATE nodes SET status = ?, version = version + 1, updated_at = ? WHERE id = ?');
+    const updated = app.database.sqlite.transaction(() => changed.map((row) => {
+      update.run(deriveDateManagedNodeStatus(row.status, row.start_date, today), now, row.id);
+      return mapNode(getNode(app, request.currentUser!.id, row.id));
+    }))();
+    return { nodes: updated };
   });
 
   app.post('/api/plans/:planId/nodes', async (request, reply) => {

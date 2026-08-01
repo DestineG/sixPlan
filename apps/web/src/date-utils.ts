@@ -1,5 +1,7 @@
 export type DateIncrementUnit = 'day' | 'week' | 'month';
 
+export { deriveDateManagedNodeStatus, isNodeOverdue } from '@sixplan/shared';
+
 function parseDateOnly(value: string): { year: number; month: number; day: number } {
   const [year, month, day] = value.split('-').map(Number);
   if (!year || !month || !day) throw new Error('无效日期');
