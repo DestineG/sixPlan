@@ -77,6 +77,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     backupDir: app.config.backupDir, exportDir: app.config.exportDir }));
 
   app.post('/api/admin/storage/open', async (request) => {
+    if (app.config.allowOpenDataDir === false) throw new AppError(403, 'STORAGE_OPEN_DISABLED', '当前部署方式不允许打开数据目录');
     if (!isLoopback(request.ip)) throw new AppError(403, 'LOOPBACK_REQUIRED', '只有从服务主机本机访问时才能打开目录');
     await open(app.config.dataDir);
     return { success: true };

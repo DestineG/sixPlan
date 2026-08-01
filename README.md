@@ -26,6 +26,25 @@ npm start
 
 默认访问地址为 `http://127.0.0.1:4173`。生产模式由 Fastify 在同一端口提供 API 和前端静态文件。
 
+## Docker Compose
+
+仅启动局域网 HTTP：
+
+```bash
+docker compose up -d --build
+```
+
+默认访问 `http://本地服务器IP:4173`，SQLite、备份和导出文件保存在 Docker volume 中。
+
+同时启用局域网 HTTP 和经 FRP 转发的公网 IP HTTPS：
+
+```bash
+cp .env.example .env
+docker compose -f compose.yaml -f compose.frp.yaml up -d --build
+```
+
+云服务器只运行 frps，本地运行 sixPlan、frpc 和 Caddy。完整配置、端口和安全说明见 [deploy/README.md](deploy/README.md)。
+
 ## 管理员命令
 
 创建管理员：
@@ -50,7 +69,9 @@ npm run admin -- promote username
 | `SIXPLAN_HOST` | `127.0.0.1` | 服务监听地址；需要局域网访问时可设为 `0.0.0.0` |
 | `SIXPLAN_PORT` | `4173` | 服务端口 |
 | `SIXPLAN_DATA_DIR` | 系统应用数据目录下的 `sixplan` | 数据库、备份和导出文件目录 |
-| `SIXPLAN_COOKIE_SECURE` | `false` | 使用 HTTPS 时设为 `true` |
+| `SIXPLAN_COOKIE_SECURE` | `auto` | `true`、`false` 或按可信代理协议自动判断的 `auto` |
+| `SIXPLAN_TRUST_PROXY` | 无 | 允许提供代理协议头的固定代理 IP 或 CIDR |
+| `SIXPLAN_ALLOW_OPEN_DATA_DIR` | `true` | Docker 或公网部署时设为 `false` |
 | `SIXPLAN_ADMIN_PASSWORD` | 无 | 创建管理员时使用的初始密码 |
 | `NODE_ENV` | 无 | 生产启动时设为 `production` |
 

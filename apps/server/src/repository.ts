@@ -4,7 +4,7 @@ import { AppError, assertFound } from './errors.js';
 
 export interface AreaRow {
   id: string; user_id: string; name: string; name_normalized: string; sort_order: number;
-  version: number; created_at: string; updated_at: string; plan_count?: number; archived_plan_count?: number;
+  version: number; created_at: string; updated_at: string; plan_count?: number; active_plan_count?: number; archived_plan_count?: number;
 }
 export interface PlanRow {
   id: string; area_id: string; area_name: string; user_id: string; name: string; description: string;
@@ -20,7 +20,7 @@ export interface EdgeRow {
 
 export function mapArea(row: AreaRow): AreaDto {
   return { id: row.id, name: row.name, sortOrder: row.sort_order, version: row.version,
-    planCount: row.plan_count ?? 0, archivedPlanCount: row.archived_plan_count ?? 0,
+    planCount: row.plan_count ?? 0, activePlanCount: row.active_plan_count ?? 0, archivedPlanCount: row.archived_plan_count ?? 0,
     createdAt: row.created_at, updatedAt: row.updated_at };
 }
 export function mapPlan(row: PlanRow): PlanDto {

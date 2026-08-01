@@ -20,6 +20,15 @@ export interface AppConfig {
   backupDir: string;
   exportDir: string;
   isProduction: boolean;
+  cookieSecure?: boolean | 'auto';
+  trustedProxy?: string;
+  allowOpenDataDir?: boolean;
+}
+
+function cookieSecureMode(value?: string): boolean | 'auto' {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return 'auto';
 }
 
 export function loadConfig(): AppConfig {
@@ -35,6 +44,9 @@ export function loadConfig(): AppConfig {
     databasePath: join(dataDir, 'sixplan.db'),
     backupDir,
     exportDir,
-    isProduction: process.env.NODE_ENV === 'production'
+    isProduction: process.env.NODE_ENV === 'production',
+    cookieSecure: cookieSecureMode(process.env.SIXPLAN_COOKIE_SECURE),
+    ...(process.env.SIXPLAN_TRUST_PROXY ? { trustedProxy: process.env.SIXPLAN_TRUST_PROXY } : {}),
+    allowOpenDataDir: process.env.SIXPLAN_ALLOW_OPEN_DATA_DIR !== 'false'
   };
 }

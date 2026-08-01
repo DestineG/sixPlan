@@ -1,0 +1,10 @@
+bindPort = 7000
+
+auth.method = "token"
+auth.token = "replace-with-the-same-long-random-hex-token"
+transport.tls.force = true
+
+allowPorts = [
+  { start = 80, end = 80 },
+  { start = 443, end = 443 }
+]

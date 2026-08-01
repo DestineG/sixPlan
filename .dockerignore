@@ -1,0 +1,12 @@
+node_modules
+apps/*/dist
+packages/*/dist
+.git
+.sixplan-data
+playwright-report
+test-results
+coverage
+*.db
+*.db-shm
+*.db-wal
+.env

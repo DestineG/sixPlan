@@ -67,23 +67,28 @@ export async function createUser(
   return toUserDto(row);
 }
 
-function setSessionCookie(reply: FastifyReply, token: string): void {
+function secureCookie(app: FastifyInstance, request: FastifyRequest): boolean {
+  const mode = app.config.cookieSecure ?? 'auto';
+  return mode === true || (mode === 'auto' && request.protocol === 'https');
+}
+
+function setSessionCookie(app: FastifyInstance, request: FastifyRequest, reply: FastifyReply, token: string): void {
   reply.setCookie(SESSION_COOKIE, token, {
     path: '/',
     httpOnly: true,
     sameSite: 'strict',
-    secure: process.env.SIXPLAN_COOKIE_SECURE === 'true',
+    secure: secureCookie(app, request),
     maxAge: SESSION_MS / 1000
   });
 }
 
-async function issueSession(app: FastifyInstance, reply: FastifyReply, userId: string): Promise<void> {
+async function issueSession(app: FastifyInstance, request: FastifyRequest, reply: FastifyReply, userId: string): Promise<void> {
   const { token, tokenHash } = createSessionToken();
   const now = new Date();
   app.database.sqlite.prepare(`INSERT INTO sessions
     (id, user_id, token_hash, expires_at, last_active_at, version, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`)
     .run(randomUUID(), userId, tokenHash, new Date(now.getTime() + SESSION_MS).toISOString(), now.toISOString(), now.toISOString());
-  setSessionCookie(reply, token);
+  setSessionCookie(app, request, reply, token);
 }
 
 export async function requireAuth(request: FastifyRequest): Promise<void> {
@@ -146,7 +151,7 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     if (setting.value !== 'true') throw new AppError(403, 'REGISTRATION_CLOSED', '当前已关闭注册');
     const body = z.object({ username: UsernameSchema, password: PasswordSchema }).parse(request.body);
     const user = await createUser(app, body.username, body.password);
-    await issueSession(app, reply, user.id);
+    await issueSession(app, request, reply, user.id);
     reply.code(201);
     return { user };
   });
@@ -160,14 +165,14 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     }
     if (row.is_disabled) throw new AppError(403, 'ACCOUNT_DISABLED', '账号已被禁用');
     app.database.sqlite.prepare('DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?').run(row.id, new Date().toISOString());
-    await issueSession(app, reply, row.id);
+    await issueSession(app, request, reply, row.id);
     return { user: toUserDto(row) };
   });
 
   app.post('/api/auth/logout', { preHandler: requireAuth }, async (request, reply) => {
     const token = request.cookies[SESSION_COOKIE];
     if (token) app.database.sqlite.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(token));
-    reply.clearCookie(SESSION_COOKIE, { path: '/' });
+    reply.clearCookie(SESSION_COOKIE, { path: '/', secure: secureCookie(app, request) });
     return { success: true };
   });
 
@@ -191,7 +196,7 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
         version = version + 1, updated_at = ? WHERE id = ?`).run(passwordHash, now, row.id);
       app.database.sqlite.prepare('DELETE FROM sessions WHERE user_id = ?').run(row.id);
     })();
-    await issueSession(app, reply, row.id);
+    await issueSession(app, request, reply, row.id);
     return { success: true };
   });
 }

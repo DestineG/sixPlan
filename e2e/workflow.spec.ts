@@ -7,7 +7,7 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByLabel('密码', { exact: true }).fill('password123');
   await page.getByLabel('确认密码').fill('password123');
   await page.getByRole('button', { name: '创建账号' }).click();
-  await expect(page.getByRole('heading', { name: '全部计划' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '活跃计划' })).toBeVisible();
 
   await page.getByRole('button', { name: '新建领域' }).first().click();
   await page.getByLabel('领域名称').fill('工作');
@@ -16,8 +16,12 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
 
   await page.getByRole('button', { name: '新建计划' }).first().click();
   await page.getByLabel('计划名称').fill('实习准备');
+  await page.getByLabel('状态').selectOption('active');
   await page.getByLabel('说明').fill('准备学习、项目与投递路径');
   await page.getByRole('button', { name: '保存' }).click();
+  await expect(page.getByRole('heading', { name: '活跃计划' })).toBeVisible();
+  await expect(page.getByText('跨领域汇总 1 个进行中的计划')).toBeVisible();
+  await page.screenshot({ path: 'test-results/desktop-active-plans.png', fullPage: true });
   await page.getByRole('button', { name: /实习准备/ }).click();
   await expect(page.getByRole('heading', { name: '实习准备' })).toBeVisible();
 
@@ -94,4 +98,9 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await expect(page.getByRole('button', { name: '设置起止日期为今天' })).toHaveCount(0);
   await page.waitForTimeout(2800);
   await page.screenshot({ path: 'test-results/mobile-graph.png', fullPage: true });
+  await page.getByTitle('返回计划总览').click();
+  await page.getByRole('button', { name: /活跃计划/ }).click();
+  await expect(page.getByRole('heading', { name: '活跃计划' })).toBeVisible();
+  await expect(page.getByText('跨领域汇总 2 个进行中的计划')).toBeVisible();
+  await page.screenshot({ path: 'test-results/mobile-active-plans.png', fullPage: true });
 });

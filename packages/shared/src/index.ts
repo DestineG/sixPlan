@@ -38,6 +38,7 @@ export interface AreaDto {
   sortOrder: number;
   version: number;
   planCount: number;
+  activePlanCount: number;
   archivedPlanCount: number;
   createdAt: string;
   updatedAt: string;

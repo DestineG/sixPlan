@@ -13,7 +13,7 @@ import { registerTransferRoutes } from './transfer-routes.js';
 import { registerAdminRoutes } from './admin-routes.js';
 
 export async function buildApp(config: AppConfig = loadConfig()): Promise<FastifyInstance> {
-  const app = Fastify({ logger: process.env.NODE_ENV !== 'test', trustProxy: false, bodyLimit: 30 * 1024 * 1024 });
+  const app = Fastify({ logger: process.env.NODE_ENV !== 'test', trustProxy: config.trustedProxy ?? false, bodyLimit: 30 * 1024 * 1024 });
   app.decorate('config', config);
   app.decorate('database', createDatabase(config));
   await app.register(multipart);

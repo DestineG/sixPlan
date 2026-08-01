@@ -13,7 +13,8 @@ describe('sixPlan API', () => {
   let app: FastifyInstance; let directory: string;
   beforeEach(async () => {
     directory = mkdtempSync(join(tmpdir(), 'sixplan-test-'));
-    app = await buildApp({ host: '127.0.0.1', port: 0, dataDir: directory, databasePath: join(directory, 'test.db'), backupDir: directory, exportDir: directory, isProduction: false });
+    app = await buildApp({ host: '127.0.0.1', port: 0, dataDir: directory, databasePath: join(directory, 'test.db'), backupDir: directory, exportDir: directory,
+      isProduction: false, cookieSecure: 'auto', trustedProxy: '127.0.0.1', allowOpenDataDir: false });
     await app.ready();
   });
   afterEach(async () => { await app.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -56,6 +57,39 @@ describe('sixPlan API', () => {
     expect(updated.statusCode).toBe(200);
     const stale = await request(alice, 'PATCH', `/api/plans/${plan.id}`, { name: '旧覆盖', expectedVersion: plan.version });
     expect(stale.statusCode).toBe(409); expect(stale.json()).toMatchObject({ code: 'VERSION_CONFLICT' });
+  });
+
+  it('filters active plans across areas and reports active counts', async () => {
+    const cookie = await register('active-user');
+    const work = (await request(cookie, 'POST', '/api/areas', { name: '工作' })).json<{ area: AreaDto }>().area;
+    const life = (await request(cookie, 'POST', '/api/areas', { name: '生活' })).json<{ area: AreaDto }>().area;
+    const active = (await request(cookie, 'POST', '/api/plans', { areaId: work.id, name: '当前项目', status: 'active' })).json<{ plan: PlanDto }>().plan;
+    await request(cookie, 'POST', '/api/plans', { areaId: work.id, name: '后续规划', status: 'planning' });
+    const archived = (await request(cookie, 'POST', '/api/plans', { areaId: life.id, name: '旧项目', status: 'active' })).json<{ plan: PlanDto }>().plan;
+    await request(cookie, 'POST', `/api/plans/${archived.id}/archive`, { expectedVersion: archived.version });
+
+    const plans = (await request(cookie, 'GET', '/api/plans?status=active')).json<{ plans: PlanDto[] }>().plans;
+    expect(plans).toHaveLength(1); expect(plans[0]).toMatchObject({ id: active.id, status: 'active', archivedAt: null });
+    const areas = (await request(cookie, 'GET', '/api/areas')).json<{ areas: AreaDto[] }>().areas;
+    expect(areas.find((area) => area.id === work.id)).toMatchObject({ planCount: 2, activePlanCount: 1 });
+    expect(areas.find((area) => area.id === life.id)).toMatchObject({ planCount: 0, activePlanCount: 0, archivedPlanCount: 1 });
+  });
+
+  it('sets secure cookies only for trusted HTTPS requests and disables storage opening by configuration', async () => {
+    const http = await app.inject({ method: 'POST', url: '/api/auth/register', payload: { username: 'http-user', password: 'password123' } });
+    expect(String(http.headers['set-cookie'])).not.toMatch(/;\s*Secure/i);
+    const https = await app.inject({ method: 'POST', url: '/api/auth/register', headers: { 'x-forwarded-proto': 'https' },
+      payload: { username: 'https-user', password: 'password123' } });
+    expect(String(https.headers['set-cookie'])).toMatch(/;\s*Secure/i);
+    const spoofed = await app.inject({ method: 'POST', url: '/api/auth/register', remoteAddress: '198.51.100.2',
+      headers: { 'x-forwarded-proto': 'https' }, payload: { username: 'spoofed-user', password: 'password123' } });
+    expect(String(spoofed.headers['set-cookie'])).not.toMatch(/;\s*Secure/i);
+
+    await createUser(app, 'storage-admin', 'password123', 'admin');
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'storage-admin', password: 'password123' } });
+    const setCookie = login.headers['set-cookie']!; const cookie = (Array.isArray(setCookie) ? setCookie[0]! : setCookie).split(';')[0]!;
+    const openStorage = await request(cookie, 'POST', '/api/admin/storage/open');
+    expect(openStorage.statusCode).toBe(403); expect(openStorage.json()).toMatchObject({ code: 'STORAGE_OPEN_DISABLED' });
   });
 
   it('imports valid files independently and preserves archived metadata', async () => {

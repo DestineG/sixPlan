@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Archive, ArrowDown, ArrowUp, Download, FileInput, FileUp, Folder, FolderInput, FolderPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { Activity, Archive, ArrowDown, ArrowUp, Download, FileInput, FileUp, Folder, FolderInput, FolderPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -8,11 +8,15 @@ import { planStatusLabels, type AreaDto, type ImportResult, type PlanDto, type P
 import { api, ApiClientError, downloadFile } from '../api';
 import { ConfirmDialog, Modal } from '../components/Dialogs';
 
-type Selection = 'all' | 'archived' | string;
+type Selection = 'active' | 'all' | 'archived' | string;
 
 export function OverviewPage() {
-  const queryClient = useQueryClient(); const navigate = useNavigate(); const [searchParams] = useSearchParams();
-  const [selection, setSelection] = useState<Selection>(() => searchParams.get('view') === 'archived' ? 'archived' : 'all');
+  const queryClient = useQueryClient(); const navigate = useNavigate(); const [searchParams, setSearchParams] = useSearchParams();
+  const selection: Selection = (() => {
+    const view = searchParams.get('view');
+    if (view === 'active' || view === 'all' || view === 'archived') return view;
+    return searchParams.get('area') ?? 'active';
+  })();
   const [areaModal, setAreaModal] = useState<{ open: boolean; area?: AreaDto }>({ open: false });
   const [planModal, setPlanModal] = useState<{ open: boolean; plan?: PlanDto }>({ open: false });
   const [movePlan, setMovePlan] = useState<PlanDto | null>(null); const [confirm, setConfirm] = useState<{ plan: PlanDto; kind: 'archive' | 'delete' } | null>(null);
@@ -20,9 +24,13 @@ export function OverviewPage() {
   const areasQuery = useQuery({ queryKey: ['areas'], queryFn: () => api<{ areas: AreaDto[] }>('/api/areas') });
   const plansQuery = useQuery({ queryKey: ['plans', selection], queryFn: () => selection === 'archived'
     ? api<{ plans: PlanDto[] }>('/api/plans/archived')
-    : api<{ plans: PlanDto[] }>(`/api/plans${selection === 'all' ? '' : `?areaId=${selection}`}`) });
+    : api<{ plans: PlanDto[] }>(`/api/plans${selection === 'all' ? '' : selection === 'active' ? '?status=active' : `?areaId=${selection}`}`) });
   const areas = useMemo(() => areasQuery.data?.areas ?? [], [areasQuery.data]);
   const plans = useMemo(() => plansQuery.data?.plans ?? [], [plansQuery.data]);
+
+  function select(value: Selection) {
+    setSearchParams(value === 'active' || value === 'all' || value === 'archived' ? { view: value } : { area: value });
+  }
 
   async function refresh() { await Promise.all([queryClient.invalidateQueries({ queryKey: ['areas'] }), queryClient.invalidateQueries({ queryKey: ['plans'] })]); }
   async function mutatePlan(path: string, body: unknown, success: string, method = 'POST') {
@@ -39,16 +47,17 @@ export function OverviewPage() {
   async function deleteArea(area: AreaDto) {
     if (!window.confirm(`确定删除领域“${area.name}”？`)) return;
     try { await api(`/api/areas/${area.id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion: area.version }) });
-      if (selection === area.id) setSelection('all'); await refresh(); toast.success('领域已删除');
+      if (selection === area.id) select('all'); await refresh(); toast.success('领域已删除');
     } catch (error) { toast.error(error instanceof ApiClientError ? error.message : '删除失败'); }
   }
   const grouped = useMemo(() => areas.map((area) => ({ area, plans: plans.filter((plan) => plan.areaId === area.id) })).filter((group) => group.plans.length > 0), [areas, plans]);
   return <div className="overview-layout">
     <aside className="area-sidebar">
       <div className="sidebar-heading"><span>领域</span><button className="icon-button" title="新建领域" onClick={() => setAreaModal({ open: true })}><FolderPlus size={17} /></button></div>
-      <button className={`area-nav ${selection === 'all' ? 'active' : ''}`} onClick={() => setSelection('all')}><Folder size={17} /><span>全部计划</span></button>
+      <button className={`area-nav ${selection === 'active' ? 'active' : ''}`} onClick={() => select('active')}><Activity size={17} /><span>活跃计划</span><small>{areas.reduce((sum, area) => sum + area.activePlanCount, 0)}</small></button>
+      <button className={`area-nav ${selection === 'all' ? 'active' : ''}`} onClick={() => select('all')}><Folder size={17} /><span>全部计划</span></button>
       <div className="area-list">{areas.map((area, index) => <div className={`area-row ${selection === area.id ? 'active' : ''}`} key={area.id}>
-        <button className="area-main" onClick={() => setSelection(area.id)}><span>{area.name}</span><small>{area.planCount}</small></button>
+        <button className="area-main" onClick={() => select(area.id)}><span>{area.name}</span><small>{area.planCount}</small></button>
         <div className="area-actions">
           <button className="mini-icon" title="上移" disabled={index === 0} onClick={() => reorder(area, -1)}><ArrowUp size={13} /></button>
           <button className="mini-icon" title="下移" disabled={index === areas.length - 1} onClick={() => reorder(area, 1)}><ArrowDown size={13} /></button>
@@ -58,11 +67,11 @@ export function OverviewPage() {
             <DropdownMenu.Item className="menu-danger" onSelect={() => deleteArea(area)}><Trash2 size={15} />删除</DropdownMenu.Item>
           </DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root>
         </div></div>)}</div>
-      <button className={`area-nav archive-nav ${selection === 'archived' ? 'active' : ''}`} onClick={() => setSelection('archived')}><Archive size={17} /><span>已归档</span><small>{areas.reduce((sum, area) => sum + area.archivedPlanCount, 0)}</small></button>
+      <button className={`area-nav archive-nav ${selection === 'archived' ? 'active' : ''}`} onClick={() => select('archived')}><Archive size={17} /><span>已归档</span><small>{areas.reduce((sum, area) => sum + area.archivedPlanCount, 0)}</small></button>
     </aside>
     <section className="overview-content">
-      <div className="page-heading"><div><p className="eyebrow">计划空间</p><h1>{selection === 'all' ? '全部计划' : selection === 'archived' ? '已归档' : areas.find((area) => area.id === selection)?.name ?? '计划'}</h1>
-        <p>{selection === 'archived' ? '归档计划保持只读，可随时恢复或导出。' : `${plans.length} 个计划`}</p></div>
+      <div className="page-heading"><div><p className="eyebrow">计划空间</p><h1>{selection === 'active' ? '活跃计划' : selection === 'all' ? '全部计划' : selection === 'archived' ? '已归档' : areas.find((area) => area.id === selection)?.name ?? '计划'}</h1>
+        <p>{selection === 'active' ? `跨领域汇总 ${plans.length} 个进行中的计划` : selection === 'archived' ? '归档计划保持只读，可随时恢复或导出。' : `${plans.length} 个计划`}</p></div>
         <div className="heading-actions"><DropdownMenu.Root><DropdownMenu.Trigger asChild><button className="secondary-button"><FileUp size={17} />导入</button></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="end">
           <DropdownMenu.Item onSelect={() => setImportMode('plan')}><FileInput size={15} />导入计划</DropdownMenu.Item>
           <DropdownMenu.Item onSelect={() => setImportMode('area')}><FolderInput size={15} />导入领域</DropdownMenu.Item>
@@ -70,12 +79,12 @@ export function OverviewPage() {
           {selection !== 'archived' && <button className="primary-button" disabled={areas.length === 0} onClick={() => setPlanModal({ open: true })}><Plus size={17} />新建计划</button>}</div></div>
       {areas.length === 0 ? <EmptyState icon={<FolderPlus size={28} />} title="先创建一个领域" body="领域用于组织工作、学习和生活中的不同计划。" action={() => setAreaModal({ open: true })} actionLabel="新建领域" />
       : plansQuery.isLoading ? <div className="page-loader"><span className="spinner" />加载计划</div>
-      : plans.length === 0 ? <EmptyState icon={selection === 'archived' ? <Archive size={28} /> : <Plus size={28} />} title={selection === 'archived' ? '还没有归档计划' : '这个视图还没有计划'} body={selection === 'archived' ? '归档后的计划会集中显示在这里。' : '创建计划后即可开始搭建 DAG。'} action={selection === 'archived' ? undefined : () => setPlanModal({ open: true })} actionLabel="新建计划" />
+      : plans.length === 0 ? <EmptyState icon={selection === 'active' ? <Activity size={28} /> : selection === 'archived' ? <Archive size={28} /> : <Plus size={28} />} title={selection === 'active' ? '当前没有活跃计划' : selection === 'archived' ? '还没有归档计划' : '这个视图还没有计划'} body={selection === 'active' ? '将计划状态设为“进行中”后会显示在这里。' : selection === 'archived' ? '归档后的计划会集中显示在这里。' : '创建计划后即可开始搭建 DAG。'} action={selection === 'active' || selection === 'archived' ? undefined : () => setPlanModal({ open: true })} actionLabel="新建计划" />
       : selection === 'archived' ? <div className="archive-groups">{grouped.map(({ area, plans: areaPlans }) => <section className="archive-group" key={area.id}><h2>{area.name}<span>{areaPlans.length}</span></h2><div className="plan-grid">{areaPlans.map((plan) => <PlanCard key={plan.id} plan={plan} onOpen={() => navigate(`/plans/${plan.id}`)} onExport={() => downloadFile(`/api/plans/${plan.id}/export`).catch(showError)} onRestore={() => mutatePlan(`/api/plans/${plan.id}/restore`, { expectedVersion: plan.version }, '计划已恢复')} onDelete={() => setConfirm({ plan, kind: 'delete' })} />)}</div></section>)}</div>
       : <div className="plan-grid">{plans.map((plan) => <PlanCard key={plan.id} plan={plan} onOpen={() => navigate(`/plans/${plan.id}`)} onEdit={() => setPlanModal({ open: true, plan })} onMove={() => setMovePlan(plan)} onExport={() => downloadFile(`/api/plans/${plan.id}/export`).catch(showError)} onArchive={() => setConfirm({ plan, kind: 'archive' })} />)}</div>}
     </section>
     <AreaEditor state={areaModal} onClose={() => setAreaModal({ open: false })} onSaved={refresh} />
-    <PlanEditor state={planModal} areas={areas} preferredAreaId={selection !== 'all' && selection !== 'archived' ? selection : undefined} onClose={() => setPlanModal({ open: false })} onSaved={refresh} />
+    <PlanEditor state={planModal} areas={areas} preferredAreaId={selection !== 'active' && selection !== 'all' && selection !== 'archived' ? selection : undefined} preferredStatus={selection === 'active' ? 'active' : undefined} onClose={() => setPlanModal({ open: false })} onSaved={refresh} />
     <MovePlanModal plan={movePlan} areas={areas} onClose={() => setMovePlan(null)} onSaved={refresh} />
     <ImportPlansModal open={importMode === 'plan'} areas={areas} existingPlans={plans} onClose={() => setImportMode(null)} onImported={refresh} />
     <ImportAreaModal open={importMode === 'area'} areas={areas} onClose={() => setImportMode(null)} onImported={refresh} />
@@ -111,9 +120,9 @@ function AreaEditor({ state, onClose, onSaved }: { state: { open: boolean; area?
   return <Modal open={state.open} onOpenChange={openChanged} title={state.area ? '重命名领域' : '新建领域'}><form className="stack-form" onSubmit={submit}><label>领域名称<input autoFocus value={name} onChange={(e) => setName(e.target.value)} maxLength={100} required /></label><div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button">保存</button></div></form></Modal>;
 }
 
-function PlanEditor({ state, areas, preferredAreaId, onClose, onSaved }: { state: { open: boolean; plan?: PlanDto }; areas: AreaDto[]; preferredAreaId?: string; onClose: () => void; onSaved: () => Promise<void> }) {
+function PlanEditor({ state, areas, preferredAreaId, preferredStatus, onClose, onSaved }: { state: { open: boolean; plan?: PlanDto }; areas: AreaDto[]; preferredAreaId?: string; preferredStatus?: PlanStatus; onClose: () => void; onSaved: () => Promise<void> }) {
   const [name, setName] = useState(''); const [description, setDescription] = useState(''); const [status, setStatus] = useState<PlanStatus>('planning'); const [areaId, setAreaId] = useState('');
-  useEffect(() => { if (state.open) { setName(state.plan?.name ?? ''); setDescription(state.plan?.description ?? ''); setStatus(state.plan?.status ?? 'planning'); setAreaId(state.plan?.areaId ?? preferredAreaId ?? areas[0]?.id ?? ''); } }, [areas, preferredAreaId, state.open, state.plan]);
+  useEffect(() => { if (state.open) { setName(state.plan?.name ?? ''); setDescription(state.plan?.description ?? ''); setStatus(state.plan?.status ?? preferredStatus ?? 'planning'); setAreaId(state.plan?.areaId ?? preferredAreaId ?? areas[0]?.id ?? ''); } }, [areas, preferredAreaId, preferredStatus, state.open, state.plan]);
   function openChanged(open: boolean) { if (!open) onClose(); }
   async function submit(event: FormEvent) { event.preventDefault(); try { await api(state.plan ? `/api/plans/${state.plan.id}` : '/api/plans', { method: state.plan ? 'PATCH' : 'POST', body: JSON.stringify(state.plan ? { name, description, status, expectedVersion: state.plan.version } : { areaId, name, description, status }) }); await onSaved(); onClose(); toast.success(state.plan ? '计划已更新' : '计划已创建'); } catch (error) { showError(error); } }
   return <Modal open={state.open} onOpenChange={openChanged} title={state.plan ? '编辑计划' : '新建计划'}><form className="stack-form" onSubmit={submit}>{!state.plan && <label>所属领域<select value={areaId} onChange={(e) => setAreaId(e.target.value)}>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select></label>}<label>计划名称<input autoFocus value={name} onChange={(e) => setName(e.target.value)} maxLength={200} required /></label><label>状态<select value={status} onChange={(e) => setStatus(e.target.value as PlanStatus)}>{Object.entries(planStatusLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label>说明<textarea rows={4} value={description} onChange={(e) => setDescription(e.target.value)} maxLength={5000} /></label><div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button">保存</button></div></form></Modal>;

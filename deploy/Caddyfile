@@ -1,0 +1,17 @@
+{
+	email {$ACME_EMAIL}
+}
+
+https://{$SIXPLAN_PUBLIC_IP} {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+
+	@storageOpen path /api/admin/storage/open
+	respond @storageOpen 403
+
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy app:4173
+}

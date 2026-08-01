@@ -26,6 +26,7 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
   app.get('/api/areas', async (request) => {
     const rows = app.database.sqlite.prepare(`SELECT a.*,
       SUM(CASE WHEN p.archived_at IS NULL AND p.id IS NOT NULL THEN 1 ELSE 0 END) AS plan_count,
+      SUM(CASE WHEN p.archived_at IS NULL AND p.status = 'active' THEN 1 ELSE 0 END) AS active_plan_count,
       SUM(CASE WHEN p.archived_at IS NOT NULL THEN 1 ELSE 0 END) AS archived_plan_count
       FROM areas a LEFT JOIN plans p ON p.area_id = a.id WHERE a.user_id = ?
       GROUP BY a.id ORDER BY a.sort_order, a.created_at`).all(request.currentUser!.id) as AreaRow[];
@@ -92,13 +93,16 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
   });
 
   app.get('/api/plans', async (request) => {
-    const query = z.object({ areaId: z.string().uuid().optional() }).parse(request.query);
+    const query = z.object({ areaId: z.string().uuid().optional(), status: z.enum(PLAN_STATUSES).optional() }).parse(request.query);
     const sql = `SELECT p.*, a.name AS area_name, a.user_id,
       (SELECT COUNT(*) FROM nodes n WHERE n.plan_id = p.id) AS node_count
       FROM plans p JOIN areas a ON a.id = p.area_id
-      WHERE a.user_id = ? AND p.archived_at IS NULL ${query.areaId ? 'AND p.area_id = ?' : ''}
+      WHERE a.user_id = ? AND p.archived_at IS NULL ${query.areaId ? 'AND p.area_id = ?' : ''} ${query.status ? 'AND p.status = ?' : ''}
       ORDER BY p.updated_at DESC`;
-    const rows = app.database.sqlite.prepare(sql).all(...(query.areaId ? [request.currentUser!.id, query.areaId] : [request.currentUser!.id])) as PlanRow[];
+    const parameters: string[] = [request.currentUser!.id];
+    if (query.areaId) parameters.push(query.areaId);
+    if (query.status) parameters.push(query.status);
+    const rows = app.database.sqlite.prepare(sql).all(...parameters) as PlanRow[];
     return { plans: rows.map(mapPlan) };
   });
 

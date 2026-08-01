@@ -1,0 +1,5 @@
+Dockerfile text eol=lf
+compose*.yaml text eol=lf
+deploy/Caddyfile text eol=lf
+deploy/*.sh text eol=lf
+deploy/*.toml.example text eol=lf
