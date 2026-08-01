@@ -63,9 +63,9 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('button', { name: '设置起止日期为今天' }).click();
   await expect(page.getByLabel('节点状态')).toHaveValue('in_progress');
   await expect(selectedNodeCard).toHaveClass(/status-border-in_progress/);
-  await expect(selectedNodeCard).toHaveCSS('border-top-color', 'rgb(59, 120, 191)');
+  await expect(selectedNodeCard).toHaveCSS('border-top-color', 'rgb(37, 104, 181)');
   await expect(selectedNodeCard.locator('.node-status')).toHaveText('进行中');
-  await expect(selectedNodeCard.locator('.node-status')).toHaveCSS('background-color', 'rgb(229, 240, 251)');
+  await expect(selectedNodeCard.locator('.node-status')).toHaveCSS('background-color', 'rgb(217, 234, 255)');
   await expect(page.getByText('计划已根据节点状态自动设为进行中').last()).toBeVisible();
   await expect(page.getByLabel('计划状态', { exact: true })).toHaveValue('active');
   const startDate = await page.getByLabel('开始日期').inputValue();
@@ -112,6 +112,7 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByTitle('返回计划总览').click();
   await page.getByLabel('计划操作').click();
   await page.getByRole('menuitem', { name: '恢复' }).click();
+  await page.getByRole('button', { name: '确认恢复' }).click();
   await expect(page.getByText('计划已恢复')).toBeVisible();
 
   const areaRow = page.locator('.area-row').filter({ hasText: '工作' }).first();
@@ -191,18 +192,24 @@ test('AI 提示词、快照和增量 JSON 工作流', async ({ page }) => {
   await expect(page.getByLabel('包含目标节点 Markdown')).toBeChecked();
   await page.locator('.prompt-scope-picker').screenshot({ path: 'test-results/desktop-ai-scope-picker.png' });
   await page.getByRole('button', { name: '构造提示词' }).click();
-  await expect(page.getByLabel('生成的提示词')).toContainText('sixplan-plan-changeset');
-  await expect(page.getByLabel('生成的提示词')).toContainText('操作范围：所有节点（1/1）');
-  await expect(page.getByLabel('生成的提示词')).toContainText('已提供目标节点现有 markdown');
+  await expect(page.getByLabel('生成的提示词')).toContainText('sixplan-plan-tree-changeset');
+  await expect(page.getByLabel('生成的提示词')).toContainText('"scope": "custom"');
+  await expect(page.getByLabel('生成的提示词')).toContainText('"markdown": ""');
+  const generatedPrompt = await page.getByLabel('生成的提示词').inputValue();
+  const rootPlanKey = generatedPrompt.match(/"targetRootPlanKey":\s*"([^"]+)"/)?.[1];
+  expect(rootPlanKey).toBeTruthy();
   const changeset = {
-    format: 'sixplan-plan-changeset', version: 2, targetPlanName: 'AI 长期训练', baseRevision: 1,
-    operations: { addNodes: [{ key: 'advanced-stage', title: '进阶阶段' }], addEdges: [{ source: 'base-stage', target: 'advanced-stage' }] }
+    format: 'sixplan-plan-tree-changeset', version: 1, targetRootPlanKey: rootPlanKey,
+    baseRevisions: [{ planKey: rootPlanKey, graphRevision: 1 }], operations: {
+      updatePlans: [{ planKey: rootPlanKey, graph: { addNodes: [{ key: 'advanced-stage', title: '进阶阶段' }],
+        addEdges: [{ source: 'base-stage', target: 'advanced-stage' }] } }]
+    }
   };
   await page.getByLabel('粘贴 JSON').fill(JSON.stringify(changeset));
   await page.getByRole('button', { name: '校验并预览' }).click();
   await expect(page.getByText('确认预览')).toBeVisible();
   await expect(page.getByText('进阶阶段', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '应用增量变更' }).click();
+  await page.getByRole('button', { name: '应用计划树变更' }).click();
   await expect(page.getByRole('heading', { name: 'AI 长期训练' })).toBeVisible();
   await expect(page.locator('.graph-node')).toHaveCount(2);
   await expect(page.locator('.react-flow__edge')).toHaveCount(1);

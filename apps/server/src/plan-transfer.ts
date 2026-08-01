@@ -7,6 +7,7 @@ import {
 import { AppError } from './errors.js';
 import { isDag } from './graph.js';
 import { normalizeImportedPlanStatus, promotePlanningPlan } from './plan-status.js';
+import { createPlanKey } from './plan-tree.js';
 import { getPlan, mapPlan, type EdgeRow, type NodeRow } from './repository.js';
 
 function validDateOnly(value: string | null): boolean {
@@ -121,8 +122,8 @@ export function insertSnapshot(app: FastifyInstance, userId: string, areaId: str
   const createdAt = payload.plan.createdAt ?? now;
   const updatedAt = payload.plan.updatedAt ?? createdAt;
   app.database.sqlite.prepare(`INSERT INTO plans
-    (id,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,1,1,?,?)`).run(planId, areaId, payload.plan.name, payload.plan.description, normalized.status,
+    (id,plan_key,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,1,1,?,?)`).run(planId, createPlanKey(), areaId, payload.plan.name, payload.plan.description, normalized.status,
       payload.plan.archivedAt, createdAt, updatedAt);
   const idByKey = new Map<string, string>();
   const insertNode = app.database.sqlite.prepare(`INSERT INTO nodes

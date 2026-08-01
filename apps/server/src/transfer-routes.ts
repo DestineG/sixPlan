@@ -9,6 +9,7 @@ import { requireReadyUser } from './auth.js';
 import { collectBackup, decodeBackup, encodeBackup, restoreUserBackup } from './backup.js';
 import { getArea } from './repository.js';
 import { createSnapshot, createSnapshotPayload, insertSnapshot, validateSnapshot, validateSnapshotPayload } from './plan-transfer.js';
+import { createPlanBundle, importPlanBundle } from './plan-bundle.js';
 
 function validateAreaFile(input: unknown): AreaFile {
   const file = AreaFileSchema.parse(input);
@@ -19,10 +20,17 @@ function validateAreaFile(input: unknown): AreaFile {
 function createAreaFile(app: FastifyInstance, userId: string, areaId: string): AreaFile {
   const area = getArea(app, userId, areaId);
   const planIds = app.database.sqlite.prepare('SELECT id FROM plans WHERE area_id = ? ORDER BY created_at').all(areaId) as Array<{ id: string }>;
+  const indexById = new Map(planIds.map((plan, index) => [plan.id, index]));
+  const links = app.database.sqlite.prepare(`SELECT pn.plan_id AS parent_plan_id,pn.node_key,l.child_plan_id
+    FROM plan_links l JOIN nodes pn ON pn.id=l.parent_node_id JOIN plans cp ON cp.id=l.child_plan_id
+    WHERE pn.plan_id IN (SELECT id FROM plans WHERE area_id=?) AND cp.area_id=? ORDER BY l.created_at`).all(areaId, areaId) as
+    Array<{ parent_plan_id: string; node_key: string; child_plan_id: string }>;
   return {
     format: 'sixplan-area', version: 2, exportedAt: new Date().toISOString(),
     area: { name: area.name, createdAt: area.created_at, updatedAt: area.updated_at },
-    plans: planIds.map(({ id }) => createSnapshotPayload(app, userId, id))
+    plans: planIds.map(({ id }) => createSnapshotPayload(app, userId, id)),
+    links: links.map((link) => ({ parentPlanIndex: indexById.get(link.parent_plan_id)!, parentNodeKey: link.node_key,
+      childPlanIndex: indexById.get(link.child_plan_id)! }))
   };
 }
 
@@ -62,6 +70,36 @@ function safeFileName(name: string): string {
 
 export async function registerTransferRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireReadyUser);
+
+  app.get('/api/areas/:id/export-info', async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params); getArea(app, request.currentUser!.id, id);
+    const rows = app.database.sqlite.prepare(`SELECT pp.id parent_plan_id,pp.name parent_plan_name,cp.id child_plan_id,cp.name child_plan_name
+      FROM plan_links l JOIN nodes pn ON pn.id=l.parent_node_id JOIN plans pp ON pp.id=pn.plan_id JOIN plans cp ON cp.id=l.child_plan_id
+      JOIN areas pa ON pa.id=pp.area_id JOIN areas ca ON ca.id=cp.area_id
+      WHERE pa.user_id=? AND ca.user_id=? AND ((pa.id=? AND ca.id<>?) OR (ca.id=? AND pa.id<>?))`)
+      .all(request.currentUser!.id, request.currentUser!.id, id, id, id, id) as Array<{ parent_plan_id: string; parent_plan_name: string; child_plan_id: string; child_plan_name: string }>;
+    return { crossAreaLinks: rows.map((row) => ({ parentPlanId: row.parent_plan_id, parentPlanName: row.parent_plan_name,
+      childPlanId: row.child_plan_id, childPlanName: row.child_plan_name })) };
+  });
+  app.get('/api/plans/:id/export-bundle', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const file = createPlanBundle(app, request.currentUser!.id, id);
+    const root = file.plans.find((plan) => plan.key === file.rootPlanKey)!;
+    reply.header('Content-Type', 'application/json; charset=utf-8');
+    reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${safeFileName(root.plan.name)}.plan-bundle.json`)}`);
+    return JSON.stringify(file, null, 2);
+  });
+
+  app.post('/api/plan-bundle-imports', async (request, reply) => {
+    const body = z.object({ content: z.unknown(), targetAreaId: z.string().uuid().optional(), decisions: z.array(z.object({
+      sourceAreaName: z.string().trim().min(1).max(100), targetAreaId: z.string().uuid().optional(),
+      createAreaName: z.string().trim().min(1).max(100).optional()
+    })).optional() }).parse(request.body);
+    const result = importPlanBundle(app, request.currentUser!.id, body.content, { ...(body.targetAreaId ? { targetAreaId: body.targetAreaId } : {}),
+      ...(body.decisions ? { decisions: body.decisions } : {}) });
+    reply.code(201); return result;
+  });
+
   app.get('/api/plans/:id/export', async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const file = createSnapshot(app, request.currentUser!.id, id);
@@ -120,6 +158,15 @@ export async function registerTransferRoutes(app: FastifyInstance): Promise<void
         areaName = body.createAreaName;
       }
       const plans = file.plans.map((plan) => insertSnapshot(app, request.currentUser!.id, areaId, plan));
+      for (const link of file.links) {
+        const parent = plans[link.parentPlanIndex]?.plan; const child = plans[link.childPlanIndex]?.plan;
+        if (!parent || !child) throw new AppError(400, 'INVALID_PLAN_LINK', '领域文件中的子计划关联无效');
+        const node = app.database.sqlite.prepare('SELECT id FROM nodes WHERE plan_id=? AND node_key=?').get(parent.id, link.parentNodeKey) as { id: string } | undefined;
+        if (!node) throw new AppError(400, 'INVALID_PLAN_LINK', '领域文件中的父节点不存在');
+        const now = new Date().toISOString();
+        app.database.sqlite.prepare(`INSERT INTO plan_links (id,parent_node_id,child_plan_id,version,created_at,updated_at) VALUES (?,?,?,1,?,?)`)
+          .run(randomUUID(), node.id, child.id, now, now);
+      }
       return { areaId, areaName, importedPlanCount: plans.length, autoActivatedPlanCount: plans.filter((plan) => plan.autoActivated).length };
     })();
     reply.code(201);

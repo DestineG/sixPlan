@@ -6,8 +6,10 @@ import { requireReadyUser } from './auth.js';
 import { AppError } from './errors.js';
 import { wouldCreateCycle } from './graph.js';
 import { assertPlanningStatusAllowed, promotePlanningPlan } from './plan-status.js';
+import { ancestorTree, archivePlanIds, assertCanLink, createLink, createPlanKey, descendantPlanIds, descendantTree,
+  getLinkByParentNode, getParentLink, movePlanIds, restorePlanIds } from './plan-tree.js';
 import {
-  ensureEditable, ensureVersion, getArea, getNode, getPlan, mapArea, mapEdge, mapNode, mapPlan,
+  ensureEditable, ensureVersion, getArea, getNode, getPlan, mapArea, mapEdge, mapNode, mapNodeWithChild, mapPlan,
   type AreaRow, type EdgeRow, type NodeRow, type PlanRow
 } from './repository.js';
 
@@ -17,9 +19,18 @@ const nodeParams = z.object({ nodeId: z.string().uuid() });
 const edgeParams = z.object({ edgeId: z.string().uuid() });
 const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable();
 const requiredDateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const treeVersions = z.array(z.object({ id: z.string().uuid(), version: z.number().int().positive() }).strict()).default([]);
 
 function validateDates(startDate: string | null, endDate: string | null): void {
   if (startDate && endDate && endDate < startDate) throw new AppError(400, 'INVALID_DATE_RANGE', '结束日期不得早于开始日期');
+}
+
+function ensureDescendantVersions(app: FastifyInstance, userId: string, ids: string[], expected: Array<{ id: string; version: number }>): void {
+  const expectedById = new Map(expected.map((item) => [item.id, item.version]));
+  for (const id of ids) {
+    const plan = getPlan(app, userId, id);
+    if (expectedById.get(id) !== plan.version) throw new AppError(409, 'VERSION_CONFLICT', '计划树已被其他请求修改，请刷新后重试');
+  }
 }
 
 export async function registerDomainRoutes(app: FastifyInstance): Promise<void> {
@@ -97,18 +108,23 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
   app.get('/api/plans', async (request) => {
     const query = z.object({ areaId: z.string().uuid().optional(), status: z.enum(PLAN_STATUSES).optional(),
       archive: z.enum(['all', 'unarchived', 'archived']).default('unarchived'), q: z.string().trim().max(200).optional(),
-      sort: z.enum(['updated', 'created', 'name']).default('updated') }).parse(request.query);
+      sort: z.enum(['updated', 'created', 'name']).default('updated'), hierarchy: z.enum(['all', 'root', 'child']).default('all') }).parse(request.query);
     const predicates = ['a.user_id = ?']; const parameters: string[] = [request.currentUser!.id];
     if (query.archive === 'unarchived') predicates.push('p.archived_at IS NULL');
     if (query.archive === 'archived') predicates.push('p.archived_at IS NOT NULL');
     if (query.areaId) { predicates.push('p.area_id = ?'); parameters.push(query.areaId); }
     if (query.status) { predicates.push('p.status = ?'); parameters.push(query.status); }
+    if (query.hierarchy === 'root') predicates.push('pl.id IS NULL');
+    if (query.hierarchy === 'child') predicates.push('pl.id IS NOT NULL');
     if (query.q) { predicates.push('(instr(lower(p.name), lower(?)) > 0 OR instr(lower(p.description), lower(?)) > 0)'); parameters.push(query.q, query.q); }
     const orderBy = query.sort === 'created' ? 'p.created_at DESC, p.id' : query.sort === 'name'
       ? 'p.name COLLATE NOCASE ASC, p.created_at DESC' : 'p.updated_at DESC, p.id';
     const sql = `SELECT p.*, a.name AS area_name, a.user_id,
-      (SELECT COUNT(*) FROM nodes n WHERE n.plan_id = p.id) AS node_count
-      FROM plans p JOIN areas a ON a.id = p.area_id
+      (SELECT COUNT(*) FROM nodes n WHERE n.plan_id = p.id) AS node_count,
+      pp.id AS parent_plan_id, pp.name AS parent_plan_name, pn.id AS parent_node_id, pn.node_key AS parent_node_key,
+      pn.title AS parent_node_title, pl.version AS parent_link_version
+      FROM plans p JOIN areas a ON a.id = p.area_id LEFT JOIN plan_links pl ON pl.child_plan_id=p.id
+      LEFT JOIN nodes pn ON pn.id=pl.parent_node_id LEFT JOIN plans pp ON pp.id=pn.plan_id
       WHERE ${predicates.join(' AND ')} ORDER BY ${orderBy}`;
     const rows = app.database.sqlite.prepare(sql).all(...parameters) as PlanRow[];
     return { plans: rows.map(mapPlan) };
@@ -116,8 +132,12 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
 
   app.get('/api/plans/archived', async (request) => {
     const rows = app.database.sqlite.prepare(`SELECT p.*, a.name AS area_name, a.user_id,
-      (SELECT COUNT(*) FROM nodes n WHERE n.plan_id = p.id) AS node_count
-      FROM plans p JOIN areas a ON a.id = p.area_id WHERE a.user_id = ? AND p.archived_at IS NOT NULL
+      (SELECT COUNT(*) FROM nodes n WHERE n.plan_id = p.id) AS node_count,
+      pp.id AS parent_plan_id, pp.name AS parent_plan_name, pn.id AS parent_node_id, pn.node_key AS parent_node_key,
+      pn.title AS parent_node_title, pl.version AS parent_link_version
+      FROM plans p JOIN areas a ON a.id = p.area_id LEFT JOIN plan_links pl ON pl.child_plan_id=p.id
+      LEFT JOIN nodes pn ON pn.id=pl.parent_node_id LEFT JOIN plans pp ON pp.id=pn.plan_id
+      WHERE a.user_id = ? AND p.archived_at IS NOT NULL
       ORDER BY a.sort_order, p.archived_at DESC`).all(request.currentUser!.id) as PlanRow[];
     return { plans: rows.map(mapPlan) };
   });
@@ -126,10 +146,19 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const body = z.object({ items: z.array(z.object({ id: z.string().uuid(), expectedVersion: z.number().int().positive() })).min(1).max(500) })
       .refine((value) => new Set(value.items.map((item) => item.id)).size === value.items.length, '计划不能重复选择').parse(request.body);
     app.database.sqlite.transaction(() => {
+      const selectedIds = new Set(body.items.map((item) => item.id));
       for (const item of body.items) {
         const plan = getPlan(app, request.currentUser!.id, item.id); ensureVersion(plan.version, item.expectedVersion);
         if (!plan.archived_at) throw new AppError(409, 'PLAN_NOT_ARCHIVED', '批量删除只能包含归档计划');
+        const parent = getParentLink(app, item.id);
+        if (parent) {
+          const parentPlan = getNode(app, request.currentUser!.id, parent.parent_node_id).plan_id;
+          if (!selectedIds.has(parentPlan)) throw new AppError(409, 'LINKED_CHILD_PLAN', '批量选择包含仍关联父节点的子计划，请同时选择其父计划或先解除关联');
+        }
       }
+      const placeholders = body.items.map(() => '?').join(',');
+      app.database.sqlite.prepare(`DELETE FROM plan_links WHERE child_plan_id IN (${placeholders}) OR parent_node_id IN
+        (SELECT id FROM nodes WHERE plan_id IN (${placeholders}))`).run(...body.items.map((item) => item.id), ...body.items.map((item) => item.id));
       const remove = app.database.sqlite.prepare('DELETE FROM plans WHERE id = ?');
       for (const item of body.items) remove.run(item.id);
     })();
@@ -141,12 +170,12 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
       description: z.string().max(5000).default(''), status: z.enum(PLAN_STATUSES).default('planning') }).parse(request.body);
     const area = getArea(app, request.currentUser!.id, body.areaId);
     const now = new Date().toISOString();
-    const row: PlanRow = { id: randomUUID(), area_id: area.id, area_name: area.name, user_id: area.user_id,
+    const row: PlanRow = { id: randomUUID(), plan_key: createPlanKey(), area_id: area.id, area_name: area.name, user_id: area.user_id,
       name: body.name, description: body.description, status: body.status, archived_at: null, version: 1,
       graph_revision: 1, created_at: now, updated_at: now, node_count: 0 };
     app.database.sqlite.prepare(`INSERT INTO plans
-      (id,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
-      VALUES (@id,@area_id,@name,@description,@status,@archived_at,@version,@graph_revision,@created_at,@updated_at)`).run(row);
+      (id,plan_key,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
+      VALUES (@id,@plan_key,@area_id,@name,@description,@status,@archived_at,@version,@graph_revision,@created_at,@updated_at)`).run(row);
     reply.code(201);
     return { plan: mapPlan(row) };
   });
@@ -154,6 +183,77 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
   app.get('/api/plans/:id', async (request) => {
     const { id } = idParams.parse(request.params);
     return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)) };
+  });
+
+  app.get('/api/plans/:id/tree', async (request) => {
+    const { id } = idParams.parse(request.params);
+    const descendants = descendantTree(app, request.currentUser!.id, id); const ids = descendants.map((item) => item.plan.id);
+    const placeholders = ids.map(() => '?').join(',');
+    const totalNodeCount = (app.database.sqlite.prepare(`SELECT COUNT(*) value FROM nodes WHERE plan_id IN (${placeholders})`).get(...ids) as { value: number }).value;
+    const totalEdgeCount = (app.database.sqlite.prepare(`SELECT COUNT(*) value FROM edges WHERE plan_id IN (${placeholders})`).get(...ids) as { value: number }).value;
+    return { tree: { rootPlanId: id, ancestors: ancestorTree(app, request.currentUser!.id, id), descendants, totalNodeCount, totalEdgeCount } };
+  });
+
+  app.post('/api/nodes/:nodeId/child-plan', async (request, reply) => {
+    const { nodeId } = nodeParams.parse(request.params);
+    const body = z.discriminatedUnion('mode', [
+      z.object({ mode: z.literal('create'), areaId: z.string().uuid(), name: z.string().trim().min(1).max(200),
+        description: z.string().max(5000).default(''), expectedNodeVersion: z.number().int().positive() }),
+      z.object({ mode: z.literal('link'), childPlanId: z.string().uuid(), expectedNodeVersion: z.number().int().positive() })
+    ]).parse(request.body);
+    const result = app.database.sqlite.transaction(() => {
+      const node = getNode(app, request.currentUser!.id, nodeId); ensureEditable(node); ensureVersion(node.version, body.expectedNodeVersion);
+      let childPlanId: string;
+      if (body.mode === 'create') {
+        const area = getArea(app, request.currentUser!.id, body.areaId); const now = new Date().toISOString(); childPlanId = randomUUID();
+        app.database.sqlite.prepare(`INSERT INTO plans
+          (id,plan_key,area_id,name,description,status,archived_at,version,graph_revision,created_at,updated_at)
+          VALUES (?,?,?,?,?,'planning',NULL,1,1,?,?)`).run(childPlanId, createPlanKey(), area.id, body.name, body.description, now, now);
+      } else childPlanId = body.childPlanId;
+      createLink(app, request.currentUser!.id, nodeId, childPlanId, body.expectedNodeVersion);
+      return { node: mapNodeWithChild(app, request.currentUser!.id, getNode(app, request.currentUser!.id, nodeId)),
+        childPlan: mapPlan(getPlan(app, request.currentUser!.id, childPlanId)) };
+    })();
+    reply.code(201); return result;
+  });
+
+  app.delete('/api/nodes/:nodeId/child-plan', async (request) => {
+    const { nodeId } = nodeParams.parse(request.params);
+    const body = z.object({ expectedNodeVersion: z.number().int().positive(), expectedLinkVersion: z.number().int().positive(),
+      action: z.enum(['retain', 'archive']), includeDescendants: z.boolean().default(false) }).parse(request.body);
+    return app.database.sqlite.transaction(() => {
+      const node = getNode(app, request.currentUser!.id, nodeId); ensureEditable(node); ensureVersion(node.version, body.expectedNodeVersion);
+      const link = getLinkByParentNode(app, nodeId);
+      if (!link) throw new AppError(404, 'PLAN_LINK_NOT_FOUND', '该节点没有关联子计划');
+      ensureVersion(link.version, body.expectedLinkVersion); const now = new Date().toISOString();
+      const affected = body.action === 'archive'
+        ? archivePlanIds(app, body.includeDescendants ? descendantPlanIds(app, request.currentUser!.id, link.child_plan_id, true) : [link.child_plan_id], now) : 0;
+      app.database.sqlite.prepare('DELETE FROM plan_links WHERE id=?').run(link.id);
+      app.database.sqlite.prepare('UPDATE nodes SET version=version+1,updated_at=? WHERE id=?').run(now, nodeId);
+      app.database.sqlite.prepare('UPDATE plans SET graph_revision=graph_revision+1,updated_at=? WHERE id=?').run(now, node.plan_id);
+      return { success: true, archivedCount: affected, node: mapNodeWithChild(app, request.currentUser!.id, getNode(app, request.currentUser!.id, nodeId)) };
+    })();
+  });
+
+  app.patch('/api/plans/:id/parent', async (request) => {
+    const { id } = idParams.parse(request.params);
+    const body = z.object({ parentNodeId: z.string().uuid(), expectedPlanVersion: z.number().int().positive(),
+      expectedNodeVersion: z.number().int().positive(), expectedParentLinkVersion: z.number().int().positive().optional() }).parse(request.body);
+    return app.database.sqlite.transaction(() => {
+      const child = getPlan(app, request.currentUser!.id, id); ensureEditable(child); ensureVersion(child.version, body.expectedPlanVersion);
+      const old = getParentLink(app, id); const now = new Date().toISOString();
+      if (old) {
+        if (body.expectedParentLinkVersion === undefined) throw new AppError(409, 'VERSION_CONFLICT', '父子计划关系已变化，请刷新后重试');
+        ensureVersion(old.version, body.expectedParentLinkVersion);
+        const oldNode = getNode(app, request.currentUser!.id, old.parent_node_id);
+        app.database.sqlite.prepare('DELETE FROM plan_links WHERE id=?').run(old.id);
+        app.database.sqlite.prepare('UPDATE nodes SET version=version+1,updated_at=? WHERE id=?').run(now, oldNode.id);
+        app.database.sqlite.prepare('UPDATE plans SET graph_revision=graph_revision+1,updated_at=? WHERE id=?').run(now, oldNode.plan_id);
+      }
+      assertCanLink(app, request.currentUser!.id, body.parentNodeId, id);
+      createLink(app, request.currentUser!.id, body.parentNodeId, id, body.expectedNodeVersion);
+      return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)) };
+    })();
   });
 
   app.patch('/api/plans/:id', async (request) => {
@@ -172,43 +272,58 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
 
   app.post('/api/plans/:id/archive', async (request) => {
     const { id } = idParams.parse(request.params);
-    const body = z.object({ expectedVersion: z.number().int().positive() }).parse(request.body);
+    const body = z.object({ expectedVersion: z.number().int().positive(), includeDescendants: z.boolean().default(false), expectedDescendantVersions: treeVersions }).parse(request.body);
     const plan = getPlan(app, request.currentUser!.id, id); ensureEditable(plan); ensureVersion(plan.version, body.expectedVersion);
     const now = new Date().toISOString();
-    app.database.sqlite.prepare('UPDATE plans SET archived_at = ?, version = version + 1, updated_at = ? WHERE id = ?').run(now, now, id);
-    return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)) };
+    const ids = body.includeDescendants ? descendantPlanIds(app, request.currentUser!.id, id, true) : [id];
+    if (body.includeDescendants) ensureDescendantVersions(app, request.currentUser!.id, ids.slice(1), body.expectedDescendantVersions);
+    const archivedCount = app.database.sqlite.transaction(() => archivePlanIds(app, ids, now))();
+    return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)), archivedCount };
   });
 
   app.post('/api/plans/:id/restore', async (request) => {
     const { id } = idParams.parse(request.params);
-    const body = z.object({ expectedVersion: z.number().int().positive() }).parse(request.body);
+    const body = z.object({ expectedVersion: z.number().int().positive(), includeDescendants: z.boolean().default(false), expectedDescendantVersions: treeVersions }).parse(request.body);
     const plan = getPlan(app, request.currentUser!.id, id); ensureVersion(plan.version, body.expectedVersion);
     if (!plan.archived_at) throw new AppError(409, 'PLAN_NOT_ARCHIVED', '计划尚未归档');
     const now = new Date().toISOString();
+    const ids = body.includeDescendants ? descendantPlanIds(app, request.currentUser!.id, id, true) : [id];
+    if (body.includeDescendants) ensureDescendantVersions(app, request.currentUser!.id, ids.slice(1), body.expectedDescendantVersions);
     const autoActivated = app.database.sqlite.transaction(() => {
-      app.database.sqlite.prepare('UPDATE plans SET archived_at = NULL, version = version + 1, updated_at = ? WHERE id = ?').run(now, id);
-      return promotePlanningPlan(app, id, now);
+      restorePlanIds(app, ids, now);
+      return ids.reduce((count, planId) => count + (promotePlanningPlan(app, planId, now) ? 1 : 0), 0);
     })();
-    return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)), autoActivated };
+    return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)), autoActivated: autoActivated > 0, restoredCount: ids.length };
   });
 
   app.post('/api/plans/:id/move', async (request) => {
     const { id } = idParams.parse(request.params);
-    const body = z.object({ areaId: z.string().uuid(), expectedVersion: z.number().int().positive() }).parse(request.body);
+    const body = z.object({ areaId: z.string().uuid(), expectedVersion: z.number().int().positive(), includeDescendants: z.boolean().default(false), expectedDescendantVersions: treeVersions }).parse(request.body);
     const plan = getPlan(app, request.currentUser!.id, id); ensureEditable(plan); ensureVersion(plan.version, body.expectedVersion);
     getArea(app, request.currentUser!.id, body.areaId);
-    app.database.sqlite.prepare('UPDATE plans SET area_id = ?, version = version + 1, updated_at = ? WHERE id = ?')
-      .run(body.areaId, new Date().toISOString(), id);
-    return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)) };
+    const ids = body.includeDescendants ? descendantPlanIds(app, request.currentUser!.id, id, true) : [id];
+    if (body.includeDescendants) ensureDescendantVersions(app, request.currentUser!.id, ids.slice(1), body.expectedDescendantVersions);
+    app.database.sqlite.transaction(() => movePlanIds(app, ids, body.areaId))();
+    return { plan: mapPlan(getPlan(app, request.currentUser!.id, id)), movedCount: ids.length };
   });
 
   app.delete('/api/plans/:id', async (request) => {
     const { id } = idParams.parse(request.params);
-    const body = z.object({ expectedVersion: z.number().int().positive() }).parse(request.body);
+    const body = z.object({ expectedVersion: z.number().int().positive(), scope: z.enum(['current', 'tree']).default('current'), expectedDescendantVersions: treeVersions }).parse(request.body);
     const plan = getPlan(app, request.currentUser!.id, id); ensureVersion(plan.version, body.expectedVersion);
     if (!plan.archived_at) throw new AppError(409, 'PLAN_NOT_ARCHIVED', '普通计划不能永久删除');
-    app.database.sqlite.transaction(() => app.database.sqlite.prepare('DELETE FROM plans WHERE id = ?').run(id))();
-    return { success: true };
+    if (getParentLink(app, id)) throw new AppError(409, 'LINKED_CHILD_PLAN', '请先解除子计划关联后再永久删除');
+    const tree = descendantTree(app, request.currentUser!.id, id); const ids = body.scope === 'tree' ? tree.map((item) => item.plan.id) : [id];
+    if (body.scope === 'tree') ensureDescendantVersions(app, request.currentUser!.id, ids.slice(1), body.expectedDescendantVersions);
+    app.database.sqlite.transaction(() => {
+      if (body.scope === 'tree') archivePlanIds(app, ids);
+      const placeholders = ids.map(() => '?').join(',');
+      app.database.sqlite.prepare(`DELETE FROM plan_links WHERE child_plan_id IN (${placeholders}) OR parent_node_id IN
+        (SELECT id FROM nodes WHERE plan_id IN (${placeholders}))`).run(...ids, ...ids);
+      const remove = app.database.sqlite.prepare('DELETE FROM plans WHERE id=?');
+      [...ids].reverse().forEach((planId) => remove.run(planId));
+    })();
+    return { success: true, deletedCount: ids.length, archivedBeforeDeleteCount: tree.filter((item) => !item.plan.archivedAt).length };
   });
 
   app.get('/api/plans/:planId/graph', async (request) => {
@@ -216,7 +331,7 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const plan = getPlan(app, request.currentUser!.id, planId);
     const nodeRows = app.database.sqlite.prepare('SELECT * FROM nodes WHERE plan_id = ? ORDER BY created_at').all(planId) as NodeRow[];
     const edgeRows = app.database.sqlite.prepare('SELECT * FROM edges WHERE plan_id = ? ORDER BY created_at').all(planId) as EdgeRow[];
-    const graph: GraphDto = { plan: mapPlan(plan), nodes: nodeRows.map(mapNode), edges: edgeRows.map(mapEdge) };
+    const graph: GraphDto = { plan: mapPlan(plan), nodes: nodeRows.map((node) => mapNodeWithChild(app, request.currentUser!.id, node)), edges: edgeRows.map(mapEdge) };
     return { graph };
   });
 
@@ -232,7 +347,7 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
     const result = app.database.sqlite.transaction(() => {
       const updated = changed.map((row) => {
         update.run(deriveDateManagedNodeStatus(row.status, row.start_date, today), now, row.id);
-        return mapNode(getNode(app, request.currentUser!.id, row.id));
+        return mapNodeWithChild(app, request.currentUser!.id, getNode(app, request.currentUser!.id, row.id));
       });
       return { updated, autoActivated: promotePlanningPlan(app, planId, now) };
     })();
@@ -273,15 +388,22 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
         startDate, endDate, body.summary ?? node.summary, body.extraContent ?? node.extra_content, now, nodeId);
       return promotePlanningPlan(app, node.plan_id, now);
     })();
-    return { node: mapNode(getNode(app, request.currentUser!.id, nodeId)),
+    return { node: mapNodeWithChild(app, request.currentUser!.id, getNode(app, request.currentUser!.id, nodeId)),
       plan: mapPlan(getPlan(app, request.currentUser!.id, node.plan_id)), autoActivated };
   });
 
   app.delete('/api/nodes/:nodeId', async (request) => {
     const { nodeId } = nodeParams.parse(request.params);
-    const body = z.object({ expectedVersion: z.number().int().positive() }).parse(request.body);
+    const body = z.object({ expectedVersion: z.number().int().positive(), childPlanAction: z.enum(['retain', 'archive']).optional(),
+      includeDescendants: z.boolean().default(false) }).parse(request.body);
     const node = getNode(app, request.currentUser!.id, nodeId); ensureEditable(node); ensureVersion(node.version, body.expectedVersion);
     app.database.sqlite.transaction(() => {
+      const link = getLinkByParentNode(app, nodeId);
+      if (link && !body.childPlanAction) throw new AppError(409, 'CHILD_PLAN_DECISION_REQUIRED', '请选择保留或归档关联的子计划');
+      if (link && body.childPlanAction === 'archive') {
+        const ids = body.includeDescendants ? descendantPlanIds(app, request.currentUser!.id, link.child_plan_id, true) : [link.child_plan_id];
+        archivePlanIds(app, ids);
+      }
       app.database.sqlite.prepare('DELETE FROM nodes WHERE id = ?').run(nodeId);
       app.database.sqlite.prepare('UPDATE plans SET graph_revision = graph_revision + 1 WHERE id = ?').run(node.plan_id);
     })();
@@ -298,7 +420,7 @@ export async function registerDomainRoutes(app: FastifyInstance): Promise<void> 
       ensureVersion(node.version, position.expectedVersion);
       app.database.sqlite.prepare('UPDATE nodes SET position_x = ?, position_y = ?, version = version + 1, updated_at = ? WHERE id = ?')
         .run(position.positionX, position.positionY, new Date().toISOString(), position.id);
-      return mapNode(getNode(app, request.currentUser!.id, position.id));
+      return mapNodeWithChild(app, request.currentUser!.id, getNode(app, request.currentUser!.id, position.id));
     }))();
     return { nodes: updated };
   });

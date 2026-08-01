@@ -70,7 +70,23 @@ const migrations = [
   `CREATE TRIGGER IF NOT EXISTS nodes_node_key_required_insert BEFORE INSERT ON nodes WHEN NEW.node_key IS NULL
     BEGIN SELECT RAISE(ABORT, 'node_key required'); END;
   CREATE TRIGGER IF NOT EXISTS nodes_node_key_required_update BEFORE UPDATE OF node_key ON nodes WHEN NEW.node_key IS NULL
-    BEGIN SELECT RAISE(ABORT, 'node_key required'); END;`
+    BEGIN SELECT RAISE(ABORT, 'node_key required'); END;`,
+  `ALTER TABLE plans ADD COLUMN plan_key TEXT;
+  UPDATE plans SET plan_key = 'plan-' || lower(substr(replace(id, '-', ''), 1, 12)) WHERE plan_key IS NULL;
+  CREATE UNIQUE INDEX plans_plan_key_unique ON plans(plan_key);
+  CREATE TRIGGER IF NOT EXISTS plans_plan_key_required_insert BEFORE INSERT ON plans WHEN NEW.plan_key IS NULL
+    BEGIN SELECT RAISE(ABORT, 'plan_key required'); END;
+  CREATE TRIGGER IF NOT EXISTS plans_plan_key_required_update BEFORE UPDATE OF plan_key ON plans WHEN NEW.plan_key IS NULL
+    BEGIN SELECT RAISE(ABORT, 'plan_key required'); END;
+  CREATE TABLE plan_links (
+    id TEXT PRIMARY KEY,
+    parent_node_id TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+    child_plan_id TEXT NOT NULL UNIQUE REFERENCES plans(id) ON DELETE RESTRICT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX plan_links_child_idx ON plan_links(child_plan_id);`
 ];
 
 export interface DatabaseContext {

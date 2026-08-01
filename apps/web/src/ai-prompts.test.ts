@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt } from './ai-prompts';
+import { buildBundlePrompt, buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt, buildTreeChangeSetPrompt } from './ai-prompts';
 
 describe('AI prompt construction', () => {
   it('builds a deterministic v2 snapshot prompt without internal ids', () => {
@@ -51,5 +51,24 @@ describe('AI prompt construction', () => {
 
   it('includes validation errors in repair prompts', () => {
     expect(buildRepairPrompt('{"bad":true}', '未知字段 bad')).toContain('未知字段 bad');
+  });
+
+  it('describes a complete plan bundle without forcing unnecessary child plans', () => {
+    const prompt = buildBundlePrompt('整理一个长期学习方向', '学习');
+    expect(prompt).toContain('sixplan-plan-bundle'); expect(prompt).toContain('parentPlanKey');
+    expect(prompt).toContain('简单需求可以只有根计划'); expect(prompt).toContain('需要分层时再创建子计划');
+    expect(prompt).not.toContain('锻炼');
+  });
+
+  it('keeps all tree mutation capabilities available while requiring minimal changes', () => {
+    const prompt = buildTreeChangeSetPrompt('完善下一阶段', { rootPlanKey: 'long-term', scope: 'descendants', links: [], plans: [{
+      plan: { id: 'plan-id', key: 'long-term', areaName: '学习', name: '长期学习', description: '', status: 'active', graphRevision: 9 },
+      scope: 'all', targetKeys: ['next'], leafKeys: ['next'], totalNodeCount: 1, leafNodeCount: 1, markdownIncluded: false,
+      markdownBytes: 0, nodes: [{ key: 'next', title: '下一阶段', status: 'not_started', startDate: null, endDate: null,
+        summary: '', position: { x: 0, y: 0 }, markdownBytes: 0 }], edges: []
+    }] });
+    expect(prompt).toContain('operations.addPlans'); expect(prompt).toContain('operations.updatePlans');
+    expect(prompt).toContain('operations.addLinks'); expect(prompt).toContain('removeLinks');
+    expect(prompt).toContain('"graphRevision":9'); expect(prompt).toContain('最小必要操作');
   });
 });

@@ -24,7 +24,8 @@ const backupPayloadSchema = z.object({
     settings: z.array(z.record(z.unknown())).optional(),
     userSettings: z.array(z.record(z.unknown())).optional(),
     areas: z.array(z.record(z.unknown())), plans: z.array(z.record(z.unknown())),
-    nodes: z.array(z.record(z.unknown())), edges: z.array(z.record(z.unknown()))
+    nodes: z.array(z.record(z.unknown())), edges: z.array(z.record(z.unknown())),
+    planLinks: z.array(z.record(z.unknown())).optional().default([])
   })
 });
 
@@ -34,14 +35,18 @@ const tableColumns: Record<string, string[]> = {
   users: ['id','username','username_normalized','password_hash','role','is_disabled','must_change_password','version','created_at','updated_at'],
   system_settings: ['key','value','version','updated_at'],
   areas: ['id','user_id','name','name_normalized','sort_order','version','created_at','updated_at'],
-  plans: ['id','area_id','name','description','status','archived_at','version','graph_revision','created_at','updated_at'],
+  plans: ['id','plan_key','area_id','name','description','status','archived_at','version','graph_revision','created_at','updated_at'],
   nodes: ['id','plan_id','node_key','title','status','start_date','end_date','summary','extra_content','position_x','position_y','version','created_at','updated_at'],
   user_import_settings: ['user_id','max_nodes','max_edges','max_markdown_bytes','max_file_bytes','session_hours','version','updated_at'],
-  edges: ['id','plan_id','source_node_id','target_node_id','version','created_at','updated_at']
+  edges: ['id','plan_id','source_node_id','target_node_id','version','created_at','updated_at'],
+  plan_links: ['id','parent_node_id','child_plan_id','version','created_at','updated_at']
 };
 
 function validateRows(payload: BackupPayload): void {
-  payload.data.plans.forEach((row) => { if (!('graph_revision' in row)) row.graph_revision = 1; });
+  payload.data.plans.forEach((row) => {
+    if (!('graph_revision' in row)) row.graph_revision = 1;
+    if (!('plan_key' in row)) row.plan_key = `plan-${String(row.id).replaceAll('-', '').slice(0, 12).toLowerCase()}`;
+  });
   payload.data.nodes.forEach((row) => { if (!('node_key' in row)) row.node_key = `node-${String(row.id).replaceAll('-', '').slice(0, 12).toLowerCase()}`; });
   const required = (table: keyof typeof payload.data, columns: string[]) => {
     const rows = payload.data[table];
@@ -58,6 +63,17 @@ function validateRows(payload: BackupPayload): void {
   if (payload.data.edges.some((row) => !planIds.has(String(row.plan_id)) || !nodeIds.has(String(row.source_node_id)) || !nodeIds.has(String(row.target_node_id)))) {
     throw new AppError(400, 'INVALID_BACKUP', '备份中的连接引用无效');
   }
+  const linkedChildren = new Set<string>(); const linkedParents = new Set<string>();
+  const planByNode = new Map(payload.data.nodes.map((row) => [String(row.id), String(row.plan_id)]));
+  const hierarchyEdges: Array<{ sourceNodeId: string; targetNodeId: string }> = [];
+  for (const link of payload.data.planLinks) {
+    const parentNodeId = String(link.parent_node_id); const childPlanId = String(link.child_plan_id);
+    if (!nodeIds.has(parentNodeId) || !planIds.has(childPlanId)) throw new AppError(400, 'INVALID_BACKUP', '备份中的子计划关联无效');
+    if (linkedParents.has(parentNodeId) || linkedChildren.has(childPlanId)) throw new AppError(400, 'INVALID_BACKUP', '备份中的子计划关联重复');
+    linkedParents.add(parentNodeId); linkedChildren.add(childPlanId);
+    hierarchyEdges.push({ sourceNodeId: planByNode.get(parentNodeId)!, targetNodeId: childPlanId });
+  }
+  if (!isDag([...planIds], hierarchyEdges)) throw new AppError(400, 'INVALID_BACKUP', '备份中包含计划层级循环');
   for (const planId of planIds) {
     const graphNodes = payload.data.nodes.filter((row) => String(row.plan_id) === planId).map((row) => String(row.id));
     const graphEdges = payload.data.edges.filter((row) => String(row.plan_id) === planId).map((row) => ({ sourceNodeId: String(row.source_node_id), targetNodeId: String(row.target_node_id) }));
@@ -74,6 +90,8 @@ export function collectBackup(app: FastifyInstance, scope: 'user' | 'site', user
   const plans = app.database.sqlite.prepare(`SELECT p.* FROM plans p JOIN areas a ON a.id = p.area_id${filter} ORDER BY p.created_at`).all(...args) as Record<string, unknown>[];
   const nodes = app.database.sqlite.prepare(`SELECT n.* FROM nodes n JOIN plans p ON p.id = n.plan_id JOIN areas a ON a.id = p.area_id${filter} ORDER BY n.created_at`).all(...args) as Record<string, unknown>[];
   const edges = app.database.sqlite.prepare(`SELECT e.* FROM edges e JOIN plans p ON p.id = e.plan_id JOIN areas a ON a.id = p.area_id${filter} ORDER BY e.created_at`).all(...args) as Record<string, unknown>[];
+  const planLinks = app.database.sqlite.prepare(`SELECT l.* FROM plan_links l JOIN nodes n ON n.id=l.parent_node_id
+    JOIN plans p ON p.id=n.plan_id JOIN areas a ON a.id=p.area_id${filter} ORDER BY l.created_at`).all(...args) as Record<string, unknown>[];
   return {
     format: 'sixplan-backup', version: 1, scope, createdAt: new Date().toISOString(),
     data: {
@@ -83,7 +101,7 @@ export function collectBackup(app: FastifyInstance, scope: 'user' | 'site', user
         userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings').all() as Record<string, unknown>[]
       } : {}),
       ...(scope === 'user' ? { userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings WHERE user_id = ?').all(userId) as Record<string, unknown>[] } : {}),
-      areas, plans, nodes, edges
+      areas, plans, nodes, edges, planLinks
     }
   };
 }
@@ -144,6 +162,9 @@ export function restoreUserBackup(app: FastifyInstance, userId: string, payload:
   const importFiles = app.database.sqlite.prepare('SELECT file_path FROM import_sessions WHERE user_id = ?').all(userId) as Array<{ file_path: string }>;
   app.database.sqlite.transaction(() => {
     app.database.sqlite.prepare('DELETE FROM import_sessions WHERE user_id = ?').run(userId);
+    app.database.sqlite.prepare(`DELETE FROM plan_links WHERE parent_node_id IN (SELECT n.id FROM nodes n JOIN plans p ON p.id=n.plan_id JOIN areas a ON a.id=p.area_id WHERE a.user_id=?)
+      OR child_plan_id IN (SELECT p.id FROM plans p JOIN areas a ON a.id=p.area_id WHERE a.user_id=?)`).run(userId, userId);
+    app.database.sqlite.prepare('DELETE FROM plans WHERE area_id IN (SELECT id FROM areas WHERE user_id=?)').run(userId);
     app.database.sqlite.prepare('DELETE FROM areas WHERE user_id = ?').run(userId);
     app.database.sqlite.prepare('DELETE FROM user_import_settings WHERE user_id = ?').run(userId);
     const restoredAreas = payload.data.areas.map((row) => ({ ...row, user_id: userId }));
@@ -151,6 +172,7 @@ export function restoreUserBackup(app: FastifyInstance, userId: string, payload:
     insertRows(app, 'plans', payload.data.plans);
     insertRows(app, 'nodes', payload.data.nodes);
     insertRows(app, 'edges', payload.data.edges);
+    insertRows(app, 'plan_links', payload.data.planLinks);
     if (payload.data.userSettings?.[0]) insertRows(app, 'user_import_settings', [{ ...payload.data.userSettings[0], user_id: userId }]);
   })();
   for (const file of importFiles) if (existsSync(file.file_path)) unlinkSync(file.file_path);
@@ -162,13 +184,14 @@ export function restoreSiteBackup(app: FastifyInstance, payload: BackupPayload):
   }
   const importFiles = app.database.sqlite.prepare('SELECT file_path FROM import_sessions').all() as Array<{ file_path: string }>;
   app.database.sqlite.transaction(() => {
-    app.database.sqlite.exec('DELETE FROM sessions; DELETE FROM import_sessions; DELETE FROM edges; DELETE FROM nodes; DELETE FROM plans; DELETE FROM areas; DELETE FROM user_import_settings; DELETE FROM system_settings; DELETE FROM users;');
+    app.database.sqlite.exec('DELETE FROM sessions; DELETE FROM import_sessions; DELETE FROM plan_links; DELETE FROM edges; DELETE FROM nodes; DELETE FROM plans; DELETE FROM areas; DELETE FROM user_import_settings; DELETE FROM system_settings; DELETE FROM users;');
     insertRows(app, 'users', payload.data.users!);
     insertRows(app, 'system_settings', payload.data.settings!);
     insertRows(app, 'areas', payload.data.areas);
     insertRows(app, 'plans', payload.data.plans);
     insertRows(app, 'nodes', payload.data.nodes);
     insertRows(app, 'edges', payload.data.edges);
+    insertRows(app, 'plan_links', payload.data.planLinks);
     if (payload.data.userSettings) insertRows(app, 'user_import_settings', payload.data.userSettings);
   })();
   for (const file of importFiles) if (existsSync(file.file_path)) unlinkSync(file.file_path);

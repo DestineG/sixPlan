@@ -43,6 +43,7 @@ export const areas = sqliteTable('areas', {
 
 export const plans = sqliteTable('plans', {
   id: text('id').primaryKey(),
+  key: text('plan_key').notNull().unique(),
   areaId: text('area_id').notNull().references(() => areas.id, { onDelete: 'restrict' }),
   name: text('name').notNull(),
   description: text('description').notNull().default(''),
@@ -92,10 +93,19 @@ export const userImportSettings = sqliteTable('user_import_settings', {
   updatedAt: text('updated_at').notNull()
 });
 
+export const planLinks = sqliteTable('plan_links', {
+  id: text('id').primaryKey(),
+  parentNodeId: text('parent_node_id').notNull().unique().references(() => nodes.id, { onDelete: 'cascade' }),
+  childPlanId: text('child_plan_id').notNull().unique().references(() => plans.id, { onDelete: 'restrict' }),
+  version: integer('version').notNull().default(1),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull()
+});
+
 export const importSessions = sqliteTable('import_sessions', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  kind: text('kind', { enum: ['snapshot', 'changeset'] }).notNull(),
+  kind: text('kind', { enum: ['snapshot', 'changeset', 'bundle', 'tree-changeset'] }).notNull(),
   filePath: text('file_path').notNull(),
   status: text('status', { enum: ['ready', 'applied'] }).notNull().default('ready'),
   targetPlanId: text('target_plan_id').references(() => plans.id, { onDelete: 'cascade' }),

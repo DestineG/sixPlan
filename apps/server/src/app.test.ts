@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import type { InjectOptions, Response as InjectResponse } from 'light-my-request';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from './app.js';
-import type { AreaDto, AreaFile, EdgeDto, GraphDto, ImportResult, NodeDto, PlanDto } from '@sixplan/shared';
+import type { AreaDto, AreaFile, EdgeDto, GraphDto, ImportPreviewDto, ImportResult, NodeDto, PlanDto } from '@sixplan/shared';
 import { collectBackup, decodeBackup, encodeBackup, restoreSiteBackup, restoreUserBackup } from './backup.js';
 import { createUser } from './auth.js';
 
@@ -396,5 +396,99 @@ describe('sixPlan API', () => {
     restoreSiteBackup(app, await decodeBackup(await encodeBackup(sitePayload)));
     expect((await request(aliceCookie, 'GET', '/api/auth/me')).statusCode).toBe(401);
     expect(app.database.sqlite.prepare("SELECT COUNT(*) value FROM users WHERE username='temporary'").get()).toMatchObject({ value: 0 });
+  });
+
+  it('links ordinary plans through nodes and enforces ownership, cardinality and cycle rules', async () => {
+    const alice = await register('tree-alice'); const bob = await register('tree-bob');
+    const area = (await request(alice, 'POST', '/api/areas', { name: '计划树' })).json<{ area: AreaDto }>().area;
+    const parent = (await request(alice, 'POST', '/api/plans', { areaId: area.id, name: '父计划' })).json<{ plan: PlanDto }>().plan;
+    const child = (await request(alice, 'POST', '/api/plans', { areaId: area.id, name: '子计划' })).json<{ plan: PlanDto }>().plan;
+    const parentNode = (await request(alice, 'POST', `/api/plans/${parent.id}/nodes`, { title: '展开阶段', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const childNode = (await request(alice, 'POST', `/api/plans/${child.id}/nodes`, { title: '子阶段', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const linked = await request(alice, 'POST', `/api/nodes/${parentNode.id}/child-plan`, { mode: 'link', childPlanId: child.id, expectedNodeVersion: parentNode.version });
+    expect(linked.statusCode).toBe(201); const linkedNode = linked.json<{ node: NodeDto }>().node;
+    expect(linkedNode.childPlan).toMatchObject({ id: child.id, name: '子计划', nodeCount: 1, completedNodeCount: 0 });
+    const childPlans = (await request(alice, 'GET', '/api/plans?hierarchy=child')).json<{ plans: PlanDto[] }>().plans;
+    expect(childPlans).toHaveLength(1); expect(childPlans[0]?.parent).toMatchObject({ planId: parent.id, nodeId: parentNode.id });
+
+    const otherNode = (await request(alice, 'POST', `/api/plans/${parent.id}/nodes`, { title: '另一个阶段', positionX: 200, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const duplicateParent = await request(alice, 'POST', `/api/nodes/${otherNode.id}/child-plan`, { mode: 'link', childPlanId: child.id, expectedNodeVersion: otherNode.version });
+    expect(duplicateParent.statusCode).toBe(409); expect(duplicateParent.json()).toMatchObject({ code: 'PLAN_ALREADY_HAS_PARENT' });
+    const cycle = await request(alice, 'POST', `/api/nodes/${childNode.id}/child-plan`, { mode: 'link', childPlanId: parent.id, expectedNodeVersion: childNode.version });
+    expect(cycle.statusCode).toBe(409); expect(cycle.json()).toMatchObject({ code: 'PLAN_TREE_CYCLE' });
+    expect((await request(bob, 'POST', `/api/nodes/${parentNode.id}/child-plan`, { mode: 'link', childPlanId: child.id, expectedNodeVersion: linkedNode.version })).statusCode).toBe(404);
+
+    const unlinked = await request(alice, 'DELETE', `/api/nodes/${parentNode.id}/child-plan`, { expectedNodeVersion: linkedNode.version,
+      expectedLinkVersion: linkedNode.childPlan!.linkVersion, action: 'retain' });
+    expect(unlinked.statusCode).toBe(200); expect(unlinked.json<{ node: NodeDto }>().node.childPlan).toBeNull();
+    expect((await request(alice, 'GET', `/api/plans/${child.id}`)).json<{ plan: PlanDto }>().plan.parent).toBeNull();
+  });
+
+  it('recursively manages plan trees and round-trips bundles with fresh IDs', async () => {
+    const cookie = await register('tree-bundle');
+    const firstArea = (await request(cookie, 'POST', '/api/areas', { name: '来源' })).json<{ area: AreaDto }>().area;
+    const secondArea = (await request(cookie, 'POST', '/api/areas', { name: '目标' })).json<{ area: AreaDto }>().area;
+    const parent = (await request(cookie, 'POST', '/api/plans', { areaId: firstArea.id, name: '根计划' })).json<{ plan: PlanDto }>().plan;
+    const child = (await request(cookie, 'POST', '/api/plans', { areaId: firstArea.id, name: '阶段计划' })).json<{ plan: PlanDto }>().plan;
+    const node = (await request(cookie, 'POST', `/api/plans/${parent.id}/nodes`, { title: '阶段入口', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const childNode = (await request(cookie, 'POST', `/api/plans/${child.id}/nodes`, { title: '执行', positionX: 10, positionY: 20 })).json<{ node: NodeDto }>().node;
+    await request(cookie, 'PATCH', `/api/nodes/${childNode.id}`, { extraContent: '# 阶段详情', expectedVersion: childNode.version });
+    await request(cookie, 'POST', `/api/nodes/${node.id}/child-plan`, { mode: 'link', childPlanId: child.id, expectedNodeVersion: node.version });
+    const currentParent = (await request(cookie, 'GET', `/api/plans/${parent.id}`)).json<{ plan: PlanDto }>().plan;
+    const currentChild = (await request(cookie, 'GET', `/api/plans/${child.id}`)).json<{ plan: PlanDto }>().plan;
+
+    const archived = await request(cookie, 'POST', `/api/plans/${parent.id}/archive`, { expectedVersion: currentParent.version, includeDescendants: true,
+      expectedDescendantVersions: [{ id: child.id, version: currentChild.version }] });
+    expect(archived.statusCode).toBe(200); expect(archived.json()).toMatchObject({ archivedCount: 2 });
+    const archivedRoot = archived.json<{ plan: PlanDto }>().plan;
+    const archivedChild = (await request(cookie, 'GET', `/api/plans/${child.id}`)).json<{ plan: PlanDto }>().plan;
+    const restored = await request(cookie, 'POST', `/api/plans/${parent.id}/restore`, { expectedVersion: archivedRoot.version, includeDescendants: true,
+      expectedDescendantVersions: [{ id: child.id, version: archivedChild.version }] });
+    expect(restored.statusCode).toBe(200); expect(restored.json()).toMatchObject({ restoredCount: 2 });
+
+    const bundle = (await request(cookie, 'GET', `/api/plans/${parent.id}/export-bundle`)).json<Record<string, unknown>>();
+    expect(bundle).toMatchObject({ format: 'sixplan-plan-bundle', version: 1 });
+    const session = await request(cookie, 'POST', '/api/import-sessions/json', { content: bundle });
+    expect(session.statusCode).toBe(200); const preview = session.json<{ preview: ImportPreviewDto }>().preview;
+    expect(preview).toMatchObject({ kind: 'bundle', planCount: 2, linkCount: 1 });
+    const imported = await request(cookie, 'POST', `/api/import-sessions/${preview.sessionId}/apply`, { targetAreaId: secondArea.id });
+    expect(imported.statusCode).toBe(201); const importedRoot = imported.json<{ plan: PlanDto }>().plan;
+    expect(importedRoot.id).not.toBe(parent.id); expect(importedRoot.areaId).toBe(secondArea.id);
+    const importedGraph = (await request(cookie, 'GET', `/api/plans/${importedRoot.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(importedGraph.nodes[0]?.childPlan?.id).not.toBe(child.id);
+    const importedChildGraph = (await request(cookie, 'GET', `/api/plans/${importedGraph.nodes[0]!.childPlan!.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(importedChildGraph.nodes[0]).toMatchObject({ extraContent: '# 阶段详情', positionX: 10, positionY: 20 });
+  });
+
+  it('previews and applies scoped AI plan-tree changesets', async () => {
+    const cookie = await register('tree-ai');
+    const area = (await request(cookie, 'POST', '/api/areas', { name: 'AI 树' })).json<{ area: AreaDto }>().area;
+    const root = (await request(cookie, 'POST', '/api/plans', { areaId: area.id, name: '长期训练' })).json<{ plan: PlanDto }>().plan;
+    const node = (await request(cookie, 'POST', `/api/plans/${root.id}/nodes`, { title: '基础阶段', positionX: 0, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const otherNode = (await request(cookie, 'POST', `/api/plans/${root.id}/nodes`, { title: '参考阶段', positionX: 240, positionY: 0 })).json<{ node: NodeDto }>().node;
+    const contextResponse = await request(cookie, 'POST', `/api/plans/${root.id}/prompt-tree-context`, { scope: 'current', includeMarkdown: false });
+    expect(contextResponse.statusCode).toBe(200);
+    const context = contextResponse.json<{ context: { rootPlanKey: string; plans: Array<{ plan: { key: string; graphRevision: number }; targetKeys: string[] }> } }>().context;
+    const rootContext = context.plans[0]!;
+    const change = { format: 'sixplan-plan-tree-changeset', version: 1, targetRootPlanKey: context.rootPlanKey,
+      baseRevisions: [{ planKey: rootContext.plan.key, graphRevision: rootContext.plan.graphRevision }], operations: {
+        addPlans: [{ key: 'strength-phase', plan: { name: '力量阶段', status: 'planning' }, nodes: [{ key: 'strength-start', title: '开始力量训练' }], edges: [] }],
+        addLinks: [{ parentPlanKey: rootContext.plan.key, parentNodeKey: node.key, childPlanKey: 'strength-phase' }]
+      } };
+    const session = await request(cookie, 'POST', '/api/import-sessions/json', { content: change, targetPlanId: root.id,
+      promptTreeTargets: [{ planKey: rootContext.plan.key, targetKeys: rootContext.targetKeys }] });
+    expect(session.statusCode).toBe(200); const preview = session.json<{ preview: ImportPreviewDto }>().preview;
+    expect(preview).toMatchObject({ kind: 'tree-changeset', addPlanCount: 1, addLinkCount: 1 });
+    const applied = await request(cookie, 'POST', `/api/import-sessions/${preview.sessionId}/apply`, {});
+    expect(applied.statusCode).toBe(200);
+    const graph = (await request(cookie, 'GET', `/api/plans/${root.id}/graph`)).json<{ graph: GraphDto }>().graph;
+    expect(graph.nodes[0]?.childPlan).toMatchObject({ name: '力量阶段', nodeCount: 1 });
+
+    const outOfScope = structuredClone(change); outOfScope.operations.addPlans = [];
+    outOfScope.operations.addLinks = []; Object.assign(outOfScope.operations, { updatePlans: [{ planKey: rootContext.plan.key,
+      graph: { updateNodes: [{ key: node.key, changes: { summary: '越界' } }] } }] });
+    const rejected = await request(cookie, 'POST', '/api/import-sessions/json', { content: outOfScope, targetPlanId: root.id,
+      promptTreeTargets: [{ planKey: rootContext.plan.key, targetKeys: [otherNode.key] }] });
+    expect(rejected.statusCode).toBe(400); expect(rejected.json()).toMatchObject({ code: 'PROMPT_SCOPE_VIOLATION' });
   });
 });

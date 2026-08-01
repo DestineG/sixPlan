@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Archive, ArrowDown, ArrowUp, Bot, CheckSquare, Download, FileInput, FileUp, FilterX, Folder, FolderInput, FolderPlus, ListChecks, ListPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
+import { Activity, Archive, ArrowDown, ArrowUp, Bot, CheckSquare, Download, FileInput, FileUp, FilterX, Folder, FolderInput, FolderPlus, FolderTree, ListChecks, ListPlus, MoreHorizontal, Pencil, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { PLAN_STATUSES, planStatusLabels, type AreaDto, type ImportPreviewDto, type PlanDto, type PlanStatus } from '@sixplan/shared';
+import { PLAN_STATUSES, planStatusLabels, type AreaDto, type ImportPreviewDto, type PlanDto, type PlanStatus, type PlanTreeDto } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile } from '../api';
 import { ConfirmDialog, Modal } from '../components/Dialogs';
 import { AiPlanModal } from '../components/AiPlanModal';
@@ -12,6 +12,7 @@ import { AiPlanModal } from '../components/AiPlanModal';
 type Selection = 'active' | 'all' | 'archived' | string;
 type ArchiveFilter = 'all' | 'unarchived' | 'archived';
 type PlanSort = 'updated' | 'created' | 'name';
+type HierarchyFilter = 'all' | 'root' | 'child';
 
 export function OverviewPage() {
   const queryClient = useQueryClient(); const navigate = useNavigate(); const [searchParams, setSearchParams] = useSearchParams();
@@ -22,21 +23,22 @@ export function OverviewPage() {
   })();
   const [areaModal, setAreaModal] = useState<{ open: boolean; area?: AreaDto }>({ open: false });
   const [planModal, setPlanModal] = useState<{ open: boolean; plan?: PlanDto }>({ open: false });
-  const [movePlan, setMovePlan] = useState<PlanDto | null>(null); const [confirm, setConfirm] = useState<{ plan: PlanDto; kind: 'archive' | 'delete' } | null>(null);
+  const [movePlan, setMovePlan] = useState<PlanDto | null>(null); const [lifecycle, setLifecycle] = useState<{ plan: PlanDto; kind: 'archive' | 'restore' | 'delete' } | null>(null);
   const [importMode, setImportMode] = useState<'plan' | 'area' | 'ai-new' | 'ai-extend' | null>(null);
   const queryText = selection === 'all' ? searchParams.get('q') ?? '' : '';
   const filterArea = selection === 'all' ? searchParams.get('filterArea') ?? '' : '';
   const filterStatus = selection === 'all' && PLAN_STATUSES.includes(searchParams.get('status') as PlanStatus) ? searchParams.get('status') as PlanStatus : '';
   const archiveFilter = selection === 'all' && ['unarchived', 'archived'].includes(searchParams.get('archive') ?? '') ? searchParams.get('archive') as ArchiveFilter : 'all';
   const planSort = selection === 'all' && ['created', 'name'].includes(searchParams.get('sort') ?? '') ? searchParams.get('sort') as PlanSort : 'updated';
+  const hierarchyFilter = selection === 'all' && ['root', 'child'].includes(searchParams.get('hierarchy') ?? '') ? searchParams.get('hierarchy') as HierarchyFilter : 'all';
   const [searchText, setSearchText] = useState(queryText);
   const [batchMode, setBatchMode] = useState(false); const [selectedArchivedIds, setSelectedArchivedIds] = useState<Set<string>>(new Set());
   const [batchConfirm, setBatchConfirm] = useState(false); const [batchBusy, setBatchBusy] = useState(false);
   const areasQuery = useQuery({ queryKey: ['areas'], queryFn: () => api<{ areas: AreaDto[] }>('/api/areas') });
-  const plansQuery = useQuery({ queryKey: ['plans', selection, queryText, filterArea, filterStatus, archiveFilter, planSort], queryFn: () => {
+  const plansQuery = useQuery({ queryKey: ['plans', selection, queryText, filterArea, filterStatus, archiveFilter, planSort, hierarchyFilter], queryFn: () => {
     if (selection === 'archived') return api<{ plans: PlanDto[] }>('/api/plans/archived');
     if (selection === 'all') {
-      const query = new URLSearchParams({ archive: archiveFilter, sort: planSort });
+      const query = new URLSearchParams({ archive: archiveFilter, sort: planSort, hierarchy: hierarchyFilter });
       if (queryText) query.set('q', queryText); if (filterArea) query.set('areaId', filterArea); if (filterStatus) query.set('status', filterStatus);
       return api<{ plans: PlanDto[] }>(`/api/plans?${query}`);
     }
@@ -57,7 +59,7 @@ export function OverviewPage() {
   }, [queryText, searchParams, searchText, selection, setSearchParams]);
   useEffect(() => { if (selection !== 'archived') { setBatchMode(false); setSelectedArchivedIds(new Set()); } }, [selection]);
 
-  function setAllFilter(key: 'filterArea' | 'status' | 'archive' | 'sort', value: string, defaultValue: string) {
+  function setAllFilter(key: 'filterArea' | 'status' | 'archive' | 'sort' | 'hierarchy', value: string, defaultValue: string) {
     const next = new URLSearchParams(searchParams); next.set('view', 'all'); next.delete('area');
     if (value === defaultValue) next.delete(key); else next.set(key, value);
     setSearchParams(next, { replace: true });
@@ -70,11 +72,6 @@ export function OverviewPage() {
   }
 
   async function refresh() { await Promise.all([queryClient.invalidateQueries({ queryKey: ['areas'] }), queryClient.invalidateQueries({ queryKey: ['plans'] })]); }
-  async function mutatePlan(path: string, body: unknown, success: string, method = 'POST') {
-    try { const result = await api<{ autoActivated?: boolean }>(path, { method, body: JSON.stringify(body) }); toast.success(success);
-      if (result?.autoActivated) toast.success('计划已根据节点状态自动设为进行中'); await refresh(); }
-    catch (error) { toast.error(error instanceof ApiClientError ? error.message : '操作失败'); }
-  }
   async function reorder(area: AreaDto, direction: -1 | 1) {
     const index = areas.findIndex((item) => item.id === area.id); const other = areas[index + direction]; if (!other) return;
     await api('/api/areas/order', { method: 'PUT', body: JSON.stringify({ items: [
@@ -87,6 +84,16 @@ export function OverviewPage() {
     try { await api(`/api/areas/${area.id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion: area.version }) });
       if (selection === area.id) select('all'); await refresh(); toast.success('领域已删除');
     } catch (error) { toast.error(error instanceof ApiClientError ? error.message : '删除失败'); }
+  }
+  async function exportArea(area: AreaDto) {
+    try {
+      const info = await api<{ crossAreaLinks: Array<{ parentPlanName: string; childPlanName: string }> }>(`/api/areas/${area.id}/export-info`);
+      if (info.crossAreaLinks.length > 0) {
+        const examples = info.crossAreaLinks.slice(0, 3).map((link) => `${link.parentPlanName} → ${link.childPlanName}`).join('、');
+        if (!window.confirm(`检测到 ${info.crossAreaLinks.length} 条跨领域子计划关系（${examples}${info.crossAreaLinks.length > 3 ? '等' : ''}）。\n\n继续将只导出本领域计划并忽略跨领域关系；如需保留完整子树，请取消并从相应计划卡片选择“导出完整计划树”。`)) return;
+      }
+      await downloadFile(`/api/areas/${area.id}/export`);
+    } catch (error) { showError(error); }
   }
   const grouped = useMemo(() => areas.map((area) => ({ area, plans: plans.filter((plan) => plan.areaId === area.id) })).filter((group) => group.plans.length > 0), [areas, plans]);
   const selectedArchivedPlans = plans.filter((plan) => selectedArchivedIds.has(plan.id));
@@ -112,9 +119,10 @@ export function OverviewPage() {
       onToggle={() => toggleArchived(plan.id)} onOpen={() => selecting ? toggleArchived(plan.id) : navigate(`/plans/${plan.id}`)}
       onEdit={!archived ? () => setPlanModal({ open: true, plan }) : undefined} onMove={!archived ? () => setMovePlan(plan) : undefined}
       onExport={() => downloadFile(`/api/plans/${plan.id}/export`).catch(showError)}
-      onArchive={!archived ? () => setConfirm({ plan, kind: 'archive' }) : undefined}
-      onRestore={archived ? () => mutatePlan(`/api/plans/${plan.id}/restore`, { expectedVersion: plan.version }, '计划已恢复') : undefined}
-      onDelete={archivedView && !batchMode ? () => setConfirm({ plan, kind: 'delete' }) : undefined} />;
+      onExportTree={() => downloadFile(`/api/plans/${plan.id}/export-bundle`).catch(showError)}
+      onArchive={!archived ? () => setLifecycle({ plan, kind: 'archive' }) : undefined}
+      onRestore={archived ? () => setLifecycle({ plan, kind: 'restore' }) : undefined}
+      onDelete={archivedView && !batchMode ? () => setLifecycle({ plan, kind: 'delete' }) : undefined} />;
   }
   return <div className="overview-layout">
     <aside className="area-sidebar">
@@ -128,7 +136,7 @@ export function OverviewPage() {
           <button className="mini-icon" title="下移" disabled={index === areas.length - 1} onClick={() => reorder(area, 1)}><ArrowDown size={13} /></button>
           <DropdownMenu.Root><DropdownMenu.Trigger className="mini-icon" aria-label={`${area.name}领域操作`}><MoreHorizontal size={13} /></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="start">
             <DropdownMenu.Item onSelect={() => setAreaModal({ open: true, area })}><Pencil size={15} />重命名</DropdownMenu.Item>
-            <DropdownMenu.Item onSelect={() => downloadFile(`/api/areas/${area.id}/export`).catch(showError)}><Download size={15} />导出领域</DropdownMenu.Item>
+            <DropdownMenu.Item onSelect={() => void exportArea(area)}><Download size={15} />导出领域</DropdownMenu.Item>
             <DropdownMenu.Item className="menu-danger" onSelect={() => deleteArea(area)}><Trash2 size={15} />删除</DropdownMenu.Item>
           </DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root>
         </div></div>)}</div>
@@ -149,8 +157,9 @@ export function OverviewPage() {
         <label><span>领域</span><select aria-label="领域筛选" value={filterArea} onChange={(event) => setAllFilter('filterArea', event.target.value, '')}><option value="">全部领域</option>{areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}</select></label>
         <label><span>状态</span><select aria-label="计划状态筛选" value={filterStatus} onChange={(event) => setAllFilter('status', event.target.value, '')}><option value="">全部状态</option>{Object.entries(planStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <label><span>归档</span><select aria-label="归档状态筛选" value={archiveFilter} onChange={(event) => setAllFilter('archive', event.target.value, 'all')}><option value="all">全部</option><option value="unarchived">未归档</option><option value="archived">已归档</option></select></label>
+        <label><span>层级</span><select aria-label="计划层级筛选" value={hierarchyFilter} onChange={(event) => setAllFilter('hierarchy', event.target.value, 'all')}><option value="all">全部层级</option><option value="root">仅根计划</option><option value="child">仅子计划</option></select></label>
         <label><span>排序</span><select aria-label="计划排序" value={planSort} onChange={(event) => setAllFilter('sort', event.target.value, 'updated')}><option value="updated">最近更新</option><option value="created">创建时间</option><option value="name">计划名称</option></select></label>
-        <button className="icon-button filter-clear" title="清除筛选" aria-label="清除筛选" disabled={!queryText && !filterArea && !filterStatus && archiveFilter === 'all' && planSort === 'updated'} onClick={clearAllFilters}><FilterX size={17} /></button>
+        <button className="icon-button filter-clear" title="清除筛选" aria-label="清除筛选" disabled={!queryText && !filterArea && !filterStatus && archiveFilter === 'all' && hierarchyFilter === 'all' && planSort === 'updated'} onClick={clearAllFilters}><FilterX size={17} /></button>
       </div>}
       {selection === 'archived' && plans.length > 0 && <div className="archive-batch-toolbar">{!batchMode
         ? <button className="secondary-button" onClick={() => setBatchMode(true)}><ListChecks size={17} />批量管理</button>
@@ -158,7 +167,7 @@ export function OverviewPage() {
       </div>}
       {areas.length === 0 ? <EmptyState icon={<FolderPlus size={28} />} title="先创建一个领域" body="领域用于组织工作、学习和生活中的不同计划。" action={() => setAreaModal({ open: true })} actionLabel="新建领域" />
       : plansQuery.isLoading ? <div className="page-loader"><span className="spinner" />加载计划</div>
-      : plans.length === 0 ? <EmptyState icon={selection === 'active' ? <Activity size={28} /> : selection === 'archived' ? <Archive size={28} /> : <Plus size={28} />} title={selection === 'active' ? '当前没有活跃计划' : selection === 'archived' ? '还没有归档计划' : selection === 'all' && (queryText || filterArea || filterStatus || archiveFilter !== 'all' || planSort !== 'updated') ? '没有匹配的计划' : '这个视图还没有计划'} body={selection === 'active' ? '将计划状态设为“进行中”后会显示在这里。' : selection === 'archived' ? '归档后的计划会集中显示在这里。' : selection === 'all' && (queryText || filterArea || filterStatus || archiveFilter !== 'all' || planSort !== 'updated') ? '调整搜索词或筛选条件后重试。' : '创建计划后即可开始搭建 DAG。'} action={selection === 'active' || selection === 'archived' ? undefined : () => setPlanModal({ open: true })} actionLabel="新建计划" />
+      : plans.length === 0 ? <EmptyState icon={selection === 'active' ? <Activity size={28} /> : selection === 'archived' ? <Archive size={28} /> : <Plus size={28} />} title={selection === 'active' ? '当前没有活跃计划' : selection === 'archived' ? '还没有归档计划' : selection === 'all' && (queryText || filterArea || filterStatus || archiveFilter !== 'all' || hierarchyFilter !== 'all' || planSort !== 'updated') ? '没有匹配的计划' : '这个视图还没有计划'} body={selection === 'active' ? '将计划状态设为“进行中”后会显示在这里。' : selection === 'archived' ? '归档后的计划会集中显示在这里。' : selection === 'all' && (queryText || filterArea || filterStatus || archiveFilter !== 'all' || hierarchyFilter !== 'all' || planSort !== 'updated') ? '调整搜索词或筛选条件后重试。' : '创建计划后即可开始搭建 DAG。'} action={selection === 'active' || selection === 'archived' ? undefined : () => setPlanModal({ open: true })} actionLabel="新建计划" />
       : selection === 'archived' ? <div className="archive-groups">{grouped.map(({ area, plans: areaPlans }) => { const ids = areaPlans.map((plan) => plan.id); const selectedCount = ids.filter((id) => selectedArchivedIds.has(id)).length; return <section className="archive-group" key={area.id}><h2>{batchMode && <GroupSelectionCheckbox label={`选择${area.name}领域`} checked={selectedCount === ids.length} indeterminate={selectedCount > 0 && selectedCount < ids.length} onChange={(checked) => selectArchived(ids, checked)} />}<span className="archive-group-name">{area.name}</span><span>{areaPlans.length}</span>{batchMode && <button className="secondary-button compact" onClick={() => selectArchived(ids, selectedCount !== ids.length)}>{selectedCount === ids.length ? '取消本领域' : '选择本领域'}</button>}</h2><div className="plan-grid">{areaPlans.map((plan) => renderPlanCard(plan, true))}</div></section>; })}</div>
       : <div className="plan-grid">{plans.map((plan) => renderPlanCard(plan))}</div>}
     </section>
@@ -169,10 +178,7 @@ export function OverviewPage() {
     <ImportAreaModal open={importMode === 'area'} areas={areas} onClose={() => setImportMode(null)} onImported={refresh} />
     <AiPlanModal mode={importMode === 'ai-new' ? 'snapshot' : importMode === 'ai-extend' ? 'changeset' : null} areas={areas}
       onClose={() => setImportMode(null)} onApplied={async (plan) => { await refresh(); if (importMode === 'ai-extend') navigate(`/plans/${plan.id}`); }} />
-    <ConfirmDialog open={Boolean(confirm)} onOpenChange={(open) => !open && setConfirm(null)} title={confirm?.kind === 'archive' ? '归档计划' : '永久删除计划'}
-      description={confirm?.kind === 'archive' ? `“${confirm?.plan.name}”归档后将变为只读并移入已归档视图。` : `“${confirm?.plan.name}”及其全部节点和连接将永久删除，此操作无法撤销。`}
-      confirmLabel={confirm?.kind === 'archive' ? '确认归档' : '永久删除'} danger={confirm?.kind === 'delete'} onConfirm={async () => { if (!confirm) return;
-        await mutatePlan(`/api/plans/${confirm.plan.id}${confirm.kind === 'archive' ? '/archive' : ''}`, { expectedVersion: confirm.plan.version }, confirm.kind === 'archive' ? '计划已归档' : '计划已永久删除', confirm.kind === 'delete' ? 'DELETE' : 'POST'); setConfirm(null); }} />
+    <PlanLifecycleModal state={lifecycle} onClose={() => setLifecycle(null)} onSaved={refresh} />
     <ConfirmDialog open={batchConfirm} onOpenChange={(open) => !batchBusy && setBatchConfirm(open)} title="批量永久删除计划"
       description={`将永久删除 ${selectedArchivedPlans.length} 个计划及其全部节点和连接：${selectedArchivedPlans.slice(0, 4).map((plan) => `“${plan.name}”`).join('、')}${selectedArchivedPlans.length > 4 ? `等 ${selectedArchivedPlans.length} 个计划` : ''}。此操作无法撤销。`}
       confirmLabel={`永久删除 ${selectedArchivedPlans.length} 个计划`} danger onConfirm={batchDeleteArchived} />
@@ -191,18 +197,18 @@ function GroupSelectionCheckbox({ label, checked, indeterminate, onChange }: { l
   return <input ref={input} className="group-selection-check" type="checkbox" aria-label={label} checked={checked} onChange={(event) => onChange(event.target.checked)} />;
 }
 
-function PlanCard({ plan, selectionMode = false, selected = false, onToggle, onOpen, onEdit, onMove, onExport, onArchive, onRestore, onDelete }: {
+function PlanCard({ plan, selectionMode = false, selected = false, onToggle, onOpen, onEdit, onMove, onExport, onExportTree, onArchive, onRestore, onDelete }: {
   plan: PlanDto; selectionMode?: boolean; selected?: boolean; onToggle?: () => void; onOpen: () => void; onEdit?: () => void;
-  onMove?: () => void; onExport: () => void; onArchive?: () => void; onRestore?: () => void; onDelete?: () => void;
+  onMove?: () => void; onExport: () => void; onExportTree: () => void; onArchive?: () => void; onRestore?: () => void; onDelete?: () => void;
 }) {
   return <article className={`plan-card ${plan.archivedAt ? 'archived' : ''} ${selected ? 'batch-selected' : ''}`} onDoubleClick={selectionMode ? undefined : onOpen}>
-    <div className="plan-card-top"><div className="plan-card-badges"><span className={`status-pill status-${plan.status}`}>{planStatusLabels[plan.status]}</span>{plan.archivedAt && <span className="archived-card-badge">已归档</span>}</div>
+    <div className="plan-card-top"><div className="plan-card-badges"><span className={`status-pill status-${plan.status}`}>{planStatusLabels[plan.status]}</span>{plan.parent && <span className="child-card-badge">子计划</span>}{plan.archivedAt && <span className="archived-card-badge">已归档</span>}</div>
     {selectionMode ? <input className="batch-card-check" type="checkbox" aria-label={`选择计划 ${plan.name}`} checked={selected} onChange={onToggle} /> : <DropdownMenu.Root><DropdownMenu.Trigger className="icon-button" aria-label="计划操作"><MoreHorizontal size={18} /></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="end">
       {onEdit && <DropdownMenu.Item onSelect={onEdit}><Pencil size={15} />编辑信息</DropdownMenu.Item>}{onMove && <DropdownMenu.Item onSelect={onMove}><Folder size={15} />移动领域</DropdownMenu.Item>}
-      <DropdownMenu.Item onSelect={onExport}><Download size={15} />导出计划</DropdownMenu.Item>{onArchive && <DropdownMenu.Item onSelect={onArchive}><Archive size={15} />归档</DropdownMenu.Item>}
+      <DropdownMenu.Item onSelect={onExport}><Download size={15} />仅导出当前计划</DropdownMenu.Item><DropdownMenu.Item onSelect={onExportTree}><FolderTree size={15} />导出完整计划树</DropdownMenu.Item>{onArchive && <DropdownMenu.Item onSelect={onArchive}><Archive size={15} />归档</DropdownMenu.Item>}
       {onRestore && <DropdownMenu.Item onSelect={onRestore}><RotateCcw size={15} />恢复</DropdownMenu.Item>}{onDelete && <DropdownMenu.Item className="menu-danger" onSelect={onDelete}><Trash2 size={15} />永久删除</DropdownMenu.Item>}
     </DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root>}</div>
-    <button className="plan-card-body" onClick={onOpen}><h2>{plan.name}</h2><p>{plan.description || '暂无说明'}</p></button>
+    <button className="plan-card-body" onClick={onOpen}><h2>{plan.name}</h2><p>{plan.description || '暂无说明'}</p></button>{plan.parent && <div className="plan-parent-path" title={`${plan.parent.planName} / ${plan.parent.nodeTitle}`}>父级：{plan.parent.planName} / {plan.parent.nodeTitle}</div>}
     <div className="plan-card-meta"><span>{plan.areaName}</span><span>{plan.nodeCount} 个节点</span><time>{new Date(plan.archivedAt ?? plan.updatedAt).toLocaleDateString('zh-CN')}</time></div></article>;
 }
 
@@ -223,12 +229,58 @@ function PlanEditor({ state, areas, preferredAreaId, preferredStatus, onClose, o
 }
 
 function MovePlanModal({ plan, areas, onClose, onSaved }: { plan: PlanDto | null; areas: AreaDto[]; onClose: () => void; onSaved: () => Promise<void> }) {
-  const [areaId, setAreaId] = useState('');
-  useEffect(() => { if (plan) setAreaId(areas.find((area) => area.id !== plan.areaId)?.id ?? plan.areaId); }, [areas, plan]);
-  return <Modal open={Boolean(plan)} onOpenChange={(open) => { if (!open) onClose(); }} title="移动计划"><form className="stack-form" onSubmit={async (e) => { e.preventDefault(); if (!plan) return; try { await api(`/api/plans/${plan.id}/move`, { method: 'POST', body: JSON.stringify({ areaId, expectedVersion: plan.version }) }); await onSaved(); onClose(); toast.success('计划已移动'); } catch (error) { showError(error); } }}><label>目标领域<select value={areaId} onChange={(e) => setAreaId(e.target.value)}>{areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}</select></label><div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!areaId || areaId === plan?.areaId}>移动</button></div></form></Modal>;
+  const [areaId, setAreaId] = useState(''); const [includeDescendants, setIncludeDescendants] = useState(false);
+  const treeQuery = useQuery({ queryKey: ['plan-tree', plan?.id], queryFn: () => api<{ tree: PlanTreeDto }>(`/api/plans/${plan!.id}/tree`), enabled: Boolean(plan) });
+  const descendants = (treeQuery.data?.tree.descendants ?? []).filter((item) => item.depth > 0);
+  useEffect(() => { if (plan) { setAreaId(areas.find((area) => area.id !== plan.areaId)?.id ?? plan.areaId); setIncludeDescendants(false); } }, [areas, plan]);
+  return <Modal open={Boolean(plan)} onOpenChange={(open) => { if (!open) onClose(); }} title="移动计划"><form className="stack-form" onSubmit={async (e) => { e.preventDefault(); if (!plan) return; try { await api(`/api/plans/${plan.id}/move`, { method: 'POST', body: JSON.stringify({ areaId, expectedVersion: plan.version, includeDescendants,
+    expectedDescendantVersions: includeDescendants ? descendants.map((item) => ({ id: item.plan.id, version: item.plan.version })) : [] }) }); await onSaved(); onClose(); toast.success(includeDescendants ? `计划及 ${descendants.length} 个后代已移动` : '计划已移动'); } catch (error) { showError(error); } }}><label>目标领域<select value={areaId} onChange={(e) => setAreaId(e.target.value)}>{areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}</select></label>{descendants.length > 0 && <label className="checkbox-row"><input type="checkbox" checked={includeDescendants} onChange={(event) => setIncludeDescendants(event.target.checked)} />同时移动全部 {descendants.length} 个后代计划</label>}{includeDescendants && <AffectedPlanList plans={descendants.map((item) => item.plan)} />}
+    <div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!areaId || areaId === plan?.areaId}>移动</button></div></form></Modal>;
 }
 
-interface ImportItem { fileName: string; sessionId: string; areaName: string; planName: string; targetAreaId: string; createAreaName: string; error?: string; }
+function AffectedPlanList({ plans }: { plans: PlanDto[] }) {
+  return <div className="affected-plan-list"><strong>受影响计划（{plans.length}）</strong><div>{plans.map((plan) => <span key={plan.id}>{plan.name}<small>{plan.nodeCount} 个节点</small></span>)}</div></div>;
+}
+
+function PlanLifecycleModal({ state, onClose, onSaved }: {
+  state: { plan: PlanDto; kind: 'archive' | 'restore' | 'delete' } | null;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [includeDescendants, setIncludeDescendants] = useState(false); const [busy, setBusy] = useState(false);
+  const plan = state?.plan; const treeQuery = useQuery({ queryKey: ['plan-tree', plan?.id],
+    queryFn: () => api<{ tree: PlanTreeDto }>(`/api/plans/${plan!.id}/tree`), enabled: Boolean(plan) });
+  const descendants = (treeQuery.data?.tree.descendants ?? []).filter((item) => item.depth > 0);
+  useEffect(() => { if (state) setIncludeDescendants(false); }, [state]);
+  async function submit() {
+    if (!state) return; setBusy(true);
+    try {
+      const expectedDescendantVersions = includeDescendants ? descendants.map((item) => ({ id: item.plan.id, version: item.plan.version })) : [];
+      if (state.kind === 'delete') await api(`/api/plans/${state.plan.id}`, { method: 'DELETE', body: JSON.stringify({
+        expectedVersion: state.plan.version, scope: includeDescendants ? 'tree' : 'current', expectedDescendantVersions }) });
+      else await api(`/api/plans/${state.plan.id}/${state.kind}`, { method: 'POST', body: JSON.stringify({
+        expectedVersion: state.plan.version, includeDescendants, expectedDescendantVersions }) });
+      const verb = state.kind === 'archive' ? '归档' : state.kind === 'restore' ? '恢复' : '永久删除';
+      toast.success(includeDescendants && descendants.length ? `计划树中的 ${descendants.length + 1} 个计划已${verb}` : `计划已${verb}`);
+      await onSaved(); onClose();
+    } catch (error) { showError(error); }
+    finally { setBusy(false); }
+  }
+  const verb = state?.kind === 'archive' ? '归档' : state?.kind === 'restore' ? '恢复' : '永久删除';
+  return <Modal open={Boolean(state)} onOpenChange={(open) => !open && onClose()} title={`${verb}计划`}
+    description={plan ? `请选择只处理“${plan.name}”，还是同时处理其全部后代计划。` : undefined}>
+    <div className="stack-form">{plan?.parent && state?.kind === 'delete' && <div className="notice warning">该计划仍关联父节点，不能独立永久删除。请先在父计划中解除关联。</div>}
+      {descendants.length > 0 ? <fieldset className="choice-fieldset"><legend>操作范围</legend><label><input type="radio" name="tree-scope" checked={!includeDescendants} onChange={() => setIncludeDescendants(false)} /><span><strong>仅当前计划</strong><small>{state?.kind === 'delete' ? '后代计划解除关系后保留为根计划' : '后代计划保持原状'}</small></span></label><label><input type="radio" name="tree-scope" checked={includeDescendants} onChange={() => setIncludeDescendants(true)} /><span><strong>当前计划及全部后代</strong><small>递归处理计划树中的 {descendants.length + 1} 个计划</small></span></label></fieldset>
+      : <div className="notice">当前计划没有后代，将只处理当前计划。</div>}
+      {includeDescendants && <AffectedPlanList plans={[plan!, ...descendants.map((item) => item.plan)]} />}
+      {state?.kind === 'delete' && <div className="notice warning">永久删除会移除 {includeDescendants ? descendants.length + 1 : 1} 个计划、{includeDescendants ? treeQuery.data?.tree.totalNodeCount ?? plan?.nodeCount ?? 0 : plan?.nodeCount ?? 0} 个节点、{includeDescendants ? `${treeQuery.data?.tree.totalEdgeCount ?? 0} 条连接` : '当前计划内全部连接'}及相关计划关系，无法撤销。未归档的后代会先自动归档再删除。</div>}
+      <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className={state?.kind === 'delete' ? 'danger-button' : 'primary-button'} disabled={busy || Boolean(plan?.parent && state?.kind === 'delete')} onClick={submit}>{busy ? '正在处理' : `确认${verb}`}</button></div>
+    </div>
+  </Modal>;
+}
+
+interface ImportItem { fileName: string; sessionId: string; kind: 'snapshot' | 'bundle'; areaName: string; sourceAreaNames: string[];
+  planName: string; planCount: number; targetAreaId: string; createAreaName: string; preserveAreas: boolean; error?: string; }
 function ImportPlansModal({ open, areas, existingPlans, onClose, onImported }: { open: boolean; areas: AreaDto[]; existingPlans: PlanDto[]; onClose: () => void; onImported: () => Promise<void> }) {
   const input = useRef<HTMLInputElement>(null); const [items, setItems] = useState<ImportItem[]>([]); const [busy, setBusy] = useState(false); const [defaultArea, setDefaultArea] = useState('');
   async function discard(entries = items) { await Promise.all(entries.filter((item) => item.sessionId).map((item) => api(`/api/import-sessions/${item.sessionId}`, { method: 'DELETE' }).catch(() => undefined))); }
@@ -238,29 +290,36 @@ function ImportPlansModal({ open, areas, existingPlans, onClose, onImported }: {
       try {
         const form = new FormData(); form.append('file', file);
         const { preview } = await api<{ preview: ImportPreviewDto }>('/api/import-sessions/upload', { method: 'POST', body: form });
-        const areaName = preview.suggestedAreaName ?? ''; const match = areas.find((area) => area.name.toLocaleLowerCase() === areaName.toLocaleLowerCase());
-        parsed.push({ fileName: file.name, sessionId: preview.sessionId, areaName, planName: preview.planName, targetAreaId: match?.id ?? '', createAreaName: match ? '' : areaName });
+        const kind = preview.kind === 'bundle' ? 'bundle' : 'snapshot'; const sourceAreaNames = preview.suggestedAreaNames ?? [];
+        const areaName = preview.suggestedAreaName ?? sourceAreaNames[0] ?? ''; const match = areas.find((area) => area.name.toLocaleLowerCase() === areaName.toLocaleLowerCase());
+        parsed.push({ fileName: file.name, sessionId: preview.sessionId, kind, areaName, sourceAreaNames, planName: preview.planName,
+          planCount: preview.planCount ?? 1, targetAreaId: match?.id ?? '', createAreaName: match ? '' : areaName, preserveAreas: kind === 'bundle' });
       } catch (error) {
-        const message = error instanceof ApiClientError ? error.message : '文件校验失败'; parsed.push({ fileName: file.name, sessionId: '', areaName: '', planName: file.name, targetAreaId: '', createAreaName: '', error: message });
+        const message = error instanceof ApiClientError ? error.message : '文件校验失败'; parsed.push({ fileName: file.name, sessionId: '', kind: 'snapshot', areaName: '', sourceAreaNames: [], planName: file.name, planCount: 1, targetAreaId: '', createAreaName: '', preserveAreas: false, error: message });
       }
     }
     setItems(parsed); setBusy(false); if (input.current) input.current.value = '';
   }
-  function applyDefault() { if (!defaultArea) return; setItems((current) => current.map((item) => item.error ? item : ({ ...item, targetAreaId: defaultArea, createAreaName: '' }))); }
-  async function submit() { const ready = items.filter((item) => !item.error); if (ready.some((item) => !item.targetAreaId && !item.createAreaName)) return toast.error('请为每个有效文件选择或创建目标领域');
+  function applyDefault() { if (!defaultArea) return; setItems((current) => current.map((item) => item.error ? item : ({ ...item, targetAreaId: defaultArea, createAreaName: '', preserveAreas: false }))); }
+  async function submit() { const ready = items.filter((item) => !item.error); if (ready.some((item) => !item.preserveAreas && !item.targetAreaId && !item.createAreaName)) return toast.error('请为每个有效文件选择或创建目标领域');
     const duplicates = ready.filter((item) => existingPlans.some((plan) => plan.areaId === item.targetAreaId && plan.name === item.planName));
     if (duplicates.length > 0 && !window.confirm(`有 ${duplicates.length} 个同名计划，将作为独立副本导入。是否继续？`)) return;
     setBusy(true); let success = 0; let autoActivated = 0; const next = [...items];
     for (let index = 0; index < next.length; index += 1) {
       const item = next[index]!; if (item.error) continue;
-      try { const result = await api<{ autoActivated?: boolean }>(`/api/import-sessions/${item.sessionId}/apply`, { method: 'POST', body: JSON.stringify(item.targetAreaId ? { targetAreaId: item.targetAreaId } : { createAreaName: item.createAreaName }) }); success += 1; if (result.autoActivated) autoActivated += 1; next[index] = { ...item, sessionId: '', error: '已导入' }; }
+      try { const areaDecisions = item.preserveAreas ? item.sourceAreaNames.map((sourceAreaName) => {
+        const match = areas.find((area) => area.name.toLocaleLowerCase() === sourceAreaName.toLocaleLowerCase());
+        return match ? { sourceAreaName, targetAreaId: match.id } : { sourceAreaName, createAreaName: sourceAreaName };
+      }) : undefined;
+        const body = item.preserveAreas ? { areaDecisions } : item.targetAreaId ? { targetAreaId: item.targetAreaId } : { createAreaName: item.createAreaName };
+        const result = await api<{ autoActivated?: boolean; autoActivatedPlanCount?: number }>(`/api/import-sessions/${item.sessionId}/apply`, { method: 'POST', body: JSON.stringify(body) }); success += 1; autoActivated += result.autoActivatedPlanCount ?? (result.autoActivated ? 1 : 0); next[index] = { ...item, sessionId: '', error: '已导入' }; }
       catch (error) { next[index] = { ...item, error: error instanceof ApiClientError ? error.message : '导入失败' }; }
     }
     const failed = next.length - success; setItems(next); toast[failed ? 'warning' : 'success'](`导入完成：${success} 成功，${failed} 失败${autoActivated ? `，其中 ${autoActivated} 个计划已自动设为进行中` : ''}`); await onImported(); setBusy(false); if (!failed) { setItems([]); onClose(); }
   }
-  return <Modal open={open} onOpenChange={(value) => { if (!value) void close(); }} title="导入计划" description="支持一次选择多个 v2 .plan.json 文件，每个文件流式校验并独立处理。" wide>
-    <div className="import-toolbar"><input ref={input} type="file" accept=".json,.plan.json" multiple hidden onChange={(e) => choose(e.target.files)} /><button className="secondary-button" onClick={() => input.current?.click()}><FileUp size={17} />选择文件</button>{items.length > 1 && <><select value={defaultArea} onChange={(e) => setDefaultArea(e.target.value)}><option value="">本批默认领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select><button className="secondary-button" onClick={applyDefault}>应用到全部</button></>}</div>
-    <div className="import-list">{items.length === 0 ? <div className="empty-inline">尚未选择文件</div> : items.map((item, index) => <div className={`import-row ${item.error ? 'import-row-error' : ''}`} key={`${item.fileName}-${index}`}><div><strong>{item.planName}</strong><small>{item.fileName}{item.areaName ? ` · 文件领域：${item.areaName}` : ''}{item.error ? ` · ${item.error}` : ''}</small></div>{!item.error && <><select value={item.targetAreaId} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, targetAreaId: e.target.value, createAreaName: '' } : entry))}><option value="">创建文件中的领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select>{!item.targetAreaId && <input aria-label="新领域名称" placeholder="新领域名称" value={item.createAreaName} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, createAreaName: e.target.value } : entry))} />}</>}</div>)}</div>
+  return <Modal open={open} onOpenChange={(value) => { if (!value) void close(); }} title="导入计划" description="支持 v2 单计划和计划树包；每个文件流式校验并独立处理。" wide>
+    <div className="import-toolbar"><input ref={input} type="file" accept=".json,.plan.json,.plan-bundle.json" multiple hidden onChange={(e) => choose(e.target.files)} /><button className="secondary-button" onClick={() => input.current?.click()}><FileUp size={17} />选择文件</button>{items.length > 1 && <><select value={defaultArea} onChange={(e) => setDefaultArea(e.target.value)}><option value="">本批默认领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select><button className="secondary-button" onClick={applyDefault}>全部导入此领域</button></>}</div>
+    <div className="import-list">{items.length === 0 ? <div className="empty-inline">尚未选择文件</div> : items.map((item, index) => <div className={`import-row ${item.error ? 'import-row-error' : ''}`} key={`${item.fileName}-${index}`}><div><strong>{item.planName}{item.kind === 'bundle' ? ' · 计划树' : ''}</strong><small>{item.fileName} · {item.planCount} 个计划{item.areaName ? ` · 文件领域：${item.sourceAreaNames.join('、') || item.areaName}` : ''}{item.error ? ` · ${item.error}` : ''}</small></div>{!item.error && <>{item.kind === 'bundle' && <select aria-label="计划树领域方式" value={item.preserveAreas ? 'preserve' : 'single'} onChange={(event) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, preserveAreas: event.target.value === 'preserve' } : entry))}><option value="preserve">保留来源领域</option><option value="single">全部导入同一领域</option></select>}{!item.preserveAreas && <><select value={item.targetAreaId} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, targetAreaId: e.target.value, createAreaName: '' } : entry))}><option value="">创建新领域</option>{areas.map((area) => <option value={area.id} key={area.id}>{area.name}</option>)}</select>{!item.targetAreaId && <input aria-label="新领域名称" placeholder="新领域名称" value={item.createAreaName} onChange={(e) => setItems((current) => current.map((entry, i) => i === index ? { ...entry, createAreaName: e.target.value } : entry))} />}</>}</>}</div>)}</div>
     <div className="dialog-actions"><button className="secondary-button" onClick={() => void close()}>取消</button><button className="primary-button" disabled={busy || items.every((item) => Boolean(item.error))} onClick={submit}>{busy ? '正在处理' : `导入 ${items.filter((item) => !item.error).length || ''} 个计划`}</button></div>
   </Modal>;
 }

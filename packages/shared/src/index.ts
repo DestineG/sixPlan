@@ -55,6 +55,7 @@ export interface AreaDto {
 
 export interface PlanDto {
   id: string;
+  key: string;
   areaId: string;
   areaName: string;
   name: string;
@@ -66,6 +67,30 @@ export interface PlanDto {
   nodeCount: number;
   createdAt: string;
   updatedAt: string;
+  parent: ParentPlanSummaryDto | null;
+}
+
+export interface ParentPlanSummaryDto {
+  planId: string;
+  planName: string;
+  nodeId: string;
+  nodeKey: string;
+  nodeTitle: string;
+  linkVersion: number;
+}
+
+export interface ChildPlanSummaryDto {
+  id: string;
+  key: string;
+  name: string;
+  areaId: string;
+  areaName: string;
+  status: PlanStatus;
+  archivedAt: string | null;
+  version: number;
+  linkVersion: number;
+  nodeCount: number;
+  completedNodeCount: number;
 }
 
 export interface NodeDto {
@@ -83,6 +108,7 @@ export interface NodeDto {
   version: number;
   createdAt: string;
   updatedAt: string;
+  childPlan: ChildPlanSummaryDto | null;
 }
 
 export interface EdgeDto {
@@ -101,7 +127,24 @@ export interface GraphDto {
   edges: EdgeDto[];
 }
 
+export interface PlanTreeItemDto {
+  plan: PlanDto;
+  depth: number;
+  parentNodeId: string | null;
+  parentNodeKey: string | null;
+  parentNodeTitle: string | null;
+}
+
+export interface PlanTreeDto {
+  rootPlanId: string;
+  ancestors: PlanTreeItemDto[];
+  descendants: PlanTreeItemDto[];
+  totalNodeCount: number;
+  totalEdgeCount: number;
+}
+
 export const NodeKeySchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/);
+export const PlanKeySchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/);
 export const IsoTimestampSchema = z.string().datetime();
 
 export const PlanSnapshotNodeSchema = z.object({
@@ -144,6 +187,25 @@ export const PlanSnapshotSchema = PlanSnapshotPayloadSchema.extend({
   areaName: z.string().trim().min(1).max(100).optional()
 }).strict();
 
+export const PlanBundleSchema = z.object({
+  format: z.literal('sixplan-plan-bundle'),
+  version: z.literal(1),
+  exportedAt: IsoTimestampSchema.optional(),
+  rootPlanKey: PlanKeySchema,
+  plans: z.array(z.object({
+    key: PlanKeySchema,
+    areaName: z.string().trim().min(1).max(100),
+    plan: PlanSnapshotPayloadSchema.shape.plan,
+    nodes: PlanSnapshotPayloadSchema.shape.nodes,
+    edges: PlanSnapshotPayloadSchema.shape.edges
+  }).strict()).min(1),
+  links: z.array(z.object({
+    parentPlanKey: PlanKeySchema,
+    parentNodeKey: NodeKeySchema,
+    childPlanKey: PlanKeySchema
+  }).strict()).default([])
+}).strict();
+
 const NodeChangesSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
   status: NodeStatusSchema.optional(),
@@ -154,11 +216,19 @@ const NodeChangesSchema = z.object({
   position: z.object({ x: z.number().finite(), y: z.number().finite() }).strict().optional()
 }).strict().refine((value) => Object.keys(value).length > 0, 'changes 至少包含一个字段');
 
-const PlanChangesSchema = z.object({
+export const PlanChangesSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(5000).optional(),
   status: PlanStatusSchema.optional()
 }).strict().refine((value) => Object.keys(value).length > 0, 'planChanges 至少包含一个字段');
+
+export const GraphOperationsSchema = z.object({
+  addNodes: z.array(PlanSnapshotNodeSchema).optional().default([]),
+  updateNodes: z.array(z.object({ key: NodeKeySchema, changes: NodeChangesSchema }).strict()).optional().default([]),
+  removeNodes: z.array(NodeKeySchema).optional().default([]),
+  addEdges: z.array(PlanSnapshotEdgeSchema.omit({ createdAt: true, updatedAt: true }).strict()).optional().default([]),
+  removeEdges: z.array(PlanSnapshotEdgeSchema.omit({ createdAt: true, updatedAt: true }).strict()).optional().default([])
+}).strict();
 
 export const PlanChangeSetSchema = z.object({
   format: z.literal('sixplan-plan-changeset'),
@@ -166,12 +236,21 @@ export const PlanChangeSetSchema = z.object({
   targetPlanName: z.string().trim().min(1).max(200).optional(),
   baseRevision: z.number().int().positive(),
   planChanges: PlanChangesSchema.optional(),
+  operations: GraphOperationsSchema
+}).strict();
+
+export const PlanTreeChangeSetSchema = z.object({
+  format: z.literal('sixplan-plan-tree-changeset'),
+  version: z.literal(1),
+  targetRootPlanKey: PlanKeySchema,
+  baseRevisions: z.array(z.object({ planKey: PlanKeySchema, graphRevision: z.number().int().positive() }).strict()).min(1),
   operations: z.object({
-    addNodes: z.array(PlanSnapshotNodeSchema).optional().default([]),
-    updateNodes: z.array(z.object({ key: NodeKeySchema, changes: NodeChangesSchema }).strict()).optional().default([]),
-    removeNodes: z.array(NodeKeySchema).optional().default([]),
-    addEdges: z.array(PlanSnapshotEdgeSchema.omit({ createdAt: true, updatedAt: true }).strict()).optional().default([]),
-    removeEdges: z.array(PlanSnapshotEdgeSchema.omit({ createdAt: true, updatedAt: true }).strict()).optional().default([])
+    addPlans: z.array(z.object({ key: PlanKeySchema, plan: PlanSnapshotPayloadSchema.shape.plan,
+      nodes: PlanSnapshotPayloadSchema.shape.nodes, edges: PlanSnapshotPayloadSchema.shape.edges }).strict()).optional().default([]),
+    updatePlans: z.array(z.object({ planKey: PlanKeySchema, planChanges: PlanChangesSchema.optional(),
+      graph: GraphOperationsSchema.optional() }).strict().refine((value) => value.planChanges || value.graph, '计划更新不能为空')).optional().default([]),
+    addLinks: z.array(z.object({ parentPlanKey: PlanKeySchema, parentNodeKey: NodeKeySchema, childPlanKey: PlanKeySchema }).strict()).optional().default([]),
+    removeLinks: z.array(z.object({ childPlanKey: PlanKeySchema }).strict()).optional().default([])
   }).strict()
 }).strict();
 
@@ -180,14 +259,18 @@ export const AreaFileSchema = z.object({
   version: z.literal(2),
   exportedAt: IsoTimestampSchema,
   area: z.object({ name: z.string().trim().min(1).max(100), createdAt: IsoTimestampSchema, updatedAt: IsoTimestampSchema }).strict(),
-  plans: z.array(PlanSnapshotPayloadSchema)
+  plans: z.array(PlanSnapshotPayloadSchema),
+  links: z.array(z.object({ parentPlanIndex: z.number().int().nonnegative(), parentNodeKey: NodeKeySchema,
+    childPlanIndex: z.number().int().nonnegative() }).strict()).optional().default([])
 }).strict();
 
 export type PlanSnapshotNode = z.infer<typeof PlanSnapshotNodeSchema>;
 export type PlanSnapshotEdge = z.infer<typeof PlanSnapshotEdgeSchema>;
 export type PlanSnapshotPayload = z.infer<typeof PlanSnapshotPayloadSchema>;
 export type PlanSnapshot = z.infer<typeof PlanSnapshotSchema>;
+export type PlanBundle = z.infer<typeof PlanBundleSchema>;
 export type PlanChangeSet = z.infer<typeof PlanChangeSetSchema>;
+export type PlanTreeChangeSet = z.infer<typeof PlanTreeChangeSetSchema>;
 export type AreaFile = z.infer<typeof AreaFileSchema>;
 
 export interface ImportSettingsDto {
@@ -201,7 +284,7 @@ export interface ImportSettingsDto {
 
 export interface ImportPreviewDto {
   sessionId: string;
-  kind: 'snapshot' | 'changeset';
+  kind: 'snapshot' | 'changeset' | 'bundle' | 'tree-changeset';
   planName: string;
   suggestedAreaName?: string;
   baseRevision?: number;
@@ -218,6 +301,14 @@ export interface ImportPreviewDto {
   expiresAt: string;
   previewNodes: Array<{ key: string; title: string; status: NodeStatus; change: 'existing' | 'add' | 'update' | 'remove' }>;
   previewEdges: Array<{ source: string; target: string; change: 'existing' | 'add' | 'remove' }>;
+  planCount?: number;
+  linkCount?: number;
+  suggestedAreaNames?: string[];
+  treeFingerprint?: string;
+  addPlanCount?: number;
+  updatePlanCount?: number;
+  addLinkCount?: number;
+  removeLinkCount?: number;
 }
 
 export interface ImportDecision {
