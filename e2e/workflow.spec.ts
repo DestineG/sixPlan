@@ -170,9 +170,13 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('button', { name: '导入领域', exact: true }).click();
   await expect(page.getByText(/领域“工作（导入）”已导入/)).toBeVisible();
   await expect(page.getByRole('button', { name: /工作（导入）/ }).first()).toBeVisible();
+  await page.getByRole('button', { name: /活跃计划/ }).click();
+  await expect(page.locator('.active-area-group')).toHaveCount(2);
+  await page.screenshot({ path: 'test-results/desktop-active-plans-grouped.png', fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole('button', { name: /工作/ }).first().click();
+  await page.getByRole('button', { name: /^工作 \d+$/ }).click();
+  await expect(page.locator('.active-area-groups')).toHaveCount(0);
   await page.getByRole('button', { name: /实习准备/ }).click();
   await expect(page.getByText('移动端只读')).toBeVisible();
   await expect(page.getByRole('button', { name: '添加节点' })).toHaveCount(0);
@@ -190,6 +194,12 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('button', { name: /活跃计划/ }).click();
   await expect(page.getByRole('heading', { name: '活跃计划' })).toBeVisible();
   await expect(page.getByText('跨领域汇总 2 个进行中的计划')).toBeVisible();
+  const activeGroups = page.locator('.active-area-group');
+  await expect(activeGroups).toHaveCount(2);
+  await expect(activeGroups.nth(0).getByRole('heading', { name: '工作' })).toBeVisible();
+  await expect(activeGroups.nth(1).getByRole('heading', { name: '工作（导入）' })).toBeVisible();
+  await expect(activeGroups.nth(0).locator('.plan-card')).toHaveCount(1);
+  await expect(activeGroups.nth(1).locator('.plan-card')).toHaveCount(1);
   await page.screenshot({ path: 'test-results/mobile-active-plans.png', fullPage: true });
 });
 

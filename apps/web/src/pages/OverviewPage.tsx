@@ -90,6 +90,7 @@ export function OverviewPage() {
     } catch (error) { toast.error(error instanceof ApiClientError ? error.message : '删除失败'); }
   }
   const grouped = useMemo(() => areas.map((area) => ({ area, plans: plans.filter((plan) => plan.areaId === area.id) })).filter((group) => group.plans.length > 0), [areas, plans]);
+  const activeGrouped = useMemo(() => grouped.map((group) => ({ ...group, plans: [...group.plans].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)) })), [grouped]);
   const selectedArchivedPlans = plans.filter((plan) => selectedArchivedIds.has(plan.id));
 
   function toggleArchived(id: string) {
@@ -161,8 +162,12 @@ export function OverviewPage() {
       {areas.length === 0 ? <EmptyState icon={<FolderPlus size={28} />} title="先创建一个领域" body="领域用于组织工作、学习和生活中的不同计划。" action={() => setAreaModal({ open: true })} actionLabel="新建领域" />
       : plansQuery.isLoading ? <div className="page-loader"><span className="spinner" />加载计划</div>
       : plans.length === 0 ? <EmptyState icon={selection === 'active' ? <Activity size={28} /> : selection === 'archived' ? <Archive size={28} /> : <Plus size={28} />} title={selection === 'active' ? '当前没有活跃计划' : selection === 'archived' ? '还没有归档计划' : selection === 'all' && (queryText || filterArea || filterStatus || archiveFilter !== 'all' || planSort !== 'updated') ? '没有匹配的计划' : '这个视图还没有计划'} body={selection === 'active' ? '将计划状态设为“进行中”后会显示在这里。' : selection === 'archived' ? '归档后的计划会集中显示在这里。' : selection === 'all' && (queryText || filterArea || filterStatus || archiveFilter !== 'all' || planSort !== 'updated') ? '调整搜索词或筛选条件后重试。' : '创建计划后即可开始搭建 DAG。'} action={selection === 'active' || selection === 'archived' ? undefined : () => setPlanModal({ open: true })} actionLabel="新建计划" />
+      : selection === 'active' ? <div className="active-area-groups">{activeGrouped.map(({ area, plans: areaPlans }) => <section className="active-area-group" aria-labelledby={`active-area-${area.id}`} key={area.id}>
+        <div className="active-area-heading"><Folder size={16} /><h2 id={`active-area-${area.id}`}>{area.name}</h2><span>{areaPlans.length} 个计划</span></div>
+        <div className="active-area-grid">{areaPlans.map((plan) => renderPlanCard(plan))}</div>
+      </section>)}</div>
       : selection === 'archived' ? <div className="archive-groups">{grouped.map(({ area, plans: areaPlans }) => { const ids = areaPlans.map((plan) => plan.id); const selectedCount = ids.filter((id) => selectedArchivedIds.has(id)).length; return <section className="archive-group" key={area.id}><h2>{batchMode && <GroupSelectionCheckbox label={`选择${area.name}领域`} checked={selectedCount === ids.length} indeterminate={selectedCount > 0 && selectedCount < ids.length} onChange={(checked) => selectArchived(ids, checked)} />}<span className="archive-group-name">{area.name}</span><span>{areaPlans.length}</span>{batchMode && <button className="secondary-button compact" onClick={() => selectArchived(ids, selectedCount !== ids.length)}>{selectedCount === ids.length ? '取消本领域' : '选择本领域'}</button>}</h2><div className="plan-grid">{areaPlans.map((plan) => renderPlanCard(plan, true))}</div></section>; })}</div>
-      : <div className={`plan-grid ${selection === 'active' ? 'active-plan-grid' : ''}`}>{plans.map((plan) => renderPlanCard(plan))}</div>}
+      : <div className="plan-grid">{plans.map((plan) => renderPlanCard(plan))}</div>}
     </section>
     <AreaEditor state={areaModal} onClose={() => setAreaModal({ open: false })} onSaved={refresh} />
     <PlanEditor state={planModal} areas={areas} preferredAreaId={selection !== 'active' && selection !== 'all' && selection !== 'archived' ? selection : undefined} preferredStatus={selection === 'active' ? 'active' : undefined} onClose={() => setPlanModal({ open: false })} onSaved={refresh} />
