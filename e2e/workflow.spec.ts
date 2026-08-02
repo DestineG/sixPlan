@@ -65,7 +65,11 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   const selectedNodeCard = page.locator('.graph-node').first();
   await selectedNodeCard.click();
   await page.getByLabel('名称').fill('学习推理基础');
-  await page.getByLabel('简短说明').fill('完成基础知识梳理');
+  const summaryInput = page.getByLabel('简短说明');
+  await summaryInput.fill('完成基础知识梳理');
+  await summaryInput.press('Home');
+  await page.getByRole('button', { name: '插入当前日期' }).click();
+  await expect(summaryInput).toHaveValue(/^\d{4}-\d{2}-\d{2}完成基础知识梳理$/);
   await page.getByRole('button', { name: '设置起止日期为今天' }).click();
   await expect(page.getByLabel('节点状态')).toHaveValue('in_progress');
   await expect(selectedNodeCard).toHaveClass(/status-border-in_progress/);

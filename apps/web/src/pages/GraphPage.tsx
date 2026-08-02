@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow, type Connection, type Edge, type Node, type NodeTypes } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
-import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, Bot, CalendarDays, CalendarX, Copy, Download, ListOrdered, Plus, Trash2 } from 'lucide-react';
+import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, Bot, CalendarDays, CalendarPlus, CalendarX, Copy, Download, ListOrdered, Plus, Trash2 } from 'lucide-react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { nodeStatusLabels, planStatusLabels, type AreaDto, type EdgeDto, type GraphDto, type NodeDto, type PlanStatus } from '@sixplan/shared';
@@ -159,13 +159,22 @@ function GraphWorkspace() {
 
 function NodeDetail({ node, readOnly, onUpdated, onPlanUpdated, onMarkdown, onSteps }: { node: NodeDto; readOnly: boolean; onUpdated: (node: NodeDto) => void; onPlanUpdated: (plan: GraphDto['plan'], autoActivated: boolean) => void; onMarkdown: () => void; onSteps: () => void }) {
   const [form, setForm] = useState({ title: node.title, status: node.status, startDate: node.startDate ?? '', endDate: node.endDate ?? '', summary: node.summary });
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle'); const dirty = useRef(false); const version = useRef(node.version);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle'); const dirty = useRef(false); const version = useRef(node.version); const summaryInput = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { if (!dirty.current) { version.current = node.version; setForm({ title: node.title, status: node.status, startDate: node.startDate ?? '', endDate: node.endDate ?? '', summary: node.summary }); } }, [node]);
   useEffect(() => { if (!dirty.current || readOnly) return; setSaveState('saving'); const timer = window.setTimeout(async () => { try { const result = await api<{ node: NodeDto; plan: GraphDto['plan']; autoActivated: boolean }>(`/api/nodes/${node.id}`, { method: 'PATCH', body: JSON.stringify({ title: form.title, status: form.status, ...(node.steps.length ? {} : { startDate: form.startDate || null, endDate: form.endDate || null }), summary: form.summary, expectedVersion: version.current }) }); version.current = result.node.version; dirty.current = false; setSaveState('saved'); onUpdated(result.node); onPlanUpdated(result.plan, result.autoActivated); } catch (error) { setSaveState('error'); toast.error(error instanceof ApiClientError ? error.message : '自动保存失败'); } }, 500); return () => clearTimeout(timer); }, [form, node.id, node.steps.length, onPlanUpdated, onUpdated, readOnly]);
   function change<K extends keyof typeof form>(key: K) { return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => { const value = event.target.value; dirty.current = true; setForm((current) => { const next = { ...current, [key]: value }; if (key === 'status' || key === 'startDate' || key === 'endDate') next.status = deriveDateManagedNodeStatus(next.status, next.startDate || null, localToday()); return next; }); }; }
   function setDatesToToday() { const today = localToday(); dirty.current = true; setForm((current) => ({ ...current, startDate: today, endDate: today, status: deriveDateManagedNodeStatus(current.status, today, today) })); }
   function clearDates() { dirty.current = true; setForm((current) => ({ ...current, startDate: '', endDate: '', status: deriveDateManagedNodeStatus(current.status, null, localToday()) })); }
   function extendEndDate(amount: number, unit: DateIncrementUnit) { if (!form.endDate) return; dirty.current = true; setForm((current) => ({ ...current, endDate: addToDateOnly(current.endDate, amount, unit), status: deriveDateManagedNodeStatus(current.status, current.startDate || null, localToday()) })); }
+  function insertTodayIntoSummary() {
+    const input = summaryInput.current;
+    if (!input || document.activeElement !== input) { toast.error('请先将光标放入简短说明'); return; }
+    const start = input.selectionStart; const end = input.selectionEnd; const today = localToday();
+    const summary = `${form.summary.slice(0, start)}${today}${form.summary.slice(end)}`;
+    if (summary.length > 2000) { toast.error('插入后将超过简短说明的 2000 字限制'); return; }
+    dirty.current = true; setForm((current) => ({ ...current, summary }));
+    requestAnimationFrame(() => { input.focus(); const caret = start + today.length; input.setSelectionRange(caret, caret); });
+  }
   const overdue = isNodeOverdue(form.status, form.endDate || null, localToday());
   const completedSteps = node.steps.filter((step) => step.status === 'completed').length;
   const activeSteps = node.steps.filter((step) => step.status === 'in_progress');
@@ -179,7 +188,7 @@ function NodeDetail({ node, readOnly, onUpdated, onPlanUpdated, onMarkdown, onSt
         <button className="secondary-button" disabled={!form.endDate} onClick={() => extendEndDate(3, 'month')}>+三个月</button>
       </div></div>}
       <div className="node-step-summary"><div><span>子阶段</span><strong>{node.steps.length ? `${completedSteps}/${node.steps.length}` : '未拆分'}</strong></div>{node.steps.length > 0 && <div className="step-progress"><span style={{ width: `${Math.round(completedSteps / node.steps.length * 100)}%` }} /></div>}{activeSteps.slice(0, 2).map((step) => <small key={step.id}>{step.title} · 进行中</small>)}<button className="secondary-button full-button" onClick={onSteps}><ListOrdered size={17} />{readOnly ? '查看子阶段' : '管理子阶段'}</button></div>
-      <label>简短说明<textarea rows={5} maxLength={2000} value={form.summary} onChange={change('summary')} disabled={readOnly} /></label>
+      <div className="summary-field"><div className="field-label-row"><label htmlFor={`node-summary-${node.id}`}>简短说明</label>{!readOnly && <button type="button" className="mini-icon" title="在光标处插入当前日期" aria-label="插入当前日期" onMouseDown={(event) => event.preventDefault()} onClick={insertTodayIntoSummary}><CalendarPlus size={15} /></button>}</div><textarea ref={summaryInput} id={`node-summary-${node.id}`} rows={5} maxLength={2000} value={form.summary} onChange={change('summary')} disabled={readOnly} /></div>
       <button className="secondary-button full-button" onClick={onMarkdown}><BookOpenText size={17} />{readOnly ? '查看附加信息' : '编辑附加信息'}</button></div>
   </div>;
 }

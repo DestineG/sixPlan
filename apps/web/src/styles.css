@@ -256,6 +256,9 @@ input:disabled, textarea:disabled, select:disabled { color: #5f6b70; background:
 .panel-heading { min-height: 54px; border-bottom: 1px solid var(--line); padding: 13px 17px; font-weight: 750; }
 .panel-heading > div { display: flex; align-items: center; justify-content: space-between; }
 .panel-form { padding: 17px; display: grid; gap: 16px; }
+.summary-field { display: grid; gap: 7px; }
+.field-label-row { display: flex; align-items: center; justify-content: space-between; color: #3a474e; font-size: 13px; font-weight: 650; }
+.field-label-row label { display: block; }
 .key-copy-row { min-height: 36px; display: flex; align-items: center; gap: 7px; padding: 4px 5px 4px 10px; border: 1px solid var(--line); border-radius: 5px; background: #f7f9fa; }
 .key-copy-row code { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 .date-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
