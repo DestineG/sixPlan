@@ -1,9 +1,9 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { Check, Clipboard, Download, FileJson, Leaf, ListChecks, RefreshCw, Sparkles, Upload } from 'lucide-react';
+import { BookOpenText, Check, Clipboard, Download, FileJson, Leaf, ListChecks, RefreshCw, Sparkles, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import type { AreaDto, ImportPreviewDto, PlanDto } from '@sixplan/shared';
 import { api, ApiClientError } from '../api';
-import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt, type PromptContext } from '../ai-prompts';
+import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt, PROJECT_INTRODUCTION, type PromptContext } from '../ai-prompts';
 import { copyText } from '../clipboard';
 import { Modal } from './Dialogs';
 
@@ -195,7 +195,7 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
             {selectedKeys.length > 200 && <div className="notice warning">当前选择包含 {selectedKeys.length} 个节点，生成的上下文可能超过部分模型的输入限制。</div>}
             {includeMarkdown && selectedMarkdownBytes > 200 * 1024 && <div className="notice warning">目标节点 Markdown 约 {formatBytes(selectedMarkdownBytes)}，请确认外部模型的上下文容量足够。</div>}</>}
         </details>
-        <button className="primary-button" disabled={busy || contextBusy || (mode === 'changeset' && (!selectedPlan || !selectedKeys.length))} onClick={makePrompt}><Sparkles size={17} />{contextBusy ? '正在构造' : '构造提示词'}</button>
+        <div className="inline-actions"><button className="secondary-button" onClick={() => copy(PROJECT_INTRODUCTION)}><BookOpenText size={17} />复制项目说明</button><button className="primary-button" disabled={busy || contextBusy || (mode === 'changeset' && (!selectedPlan || !selectedKeys.length))} onClick={makePrompt}><Sparkles size={17} />{contextBusy ? '正在构造' : '构造提示词'}</button></div>
       </section>
 
       {prompt && <section className="ai-step"><div className="ai-step-title"><span>2</span><strong>交给外部大模型</strong></div>

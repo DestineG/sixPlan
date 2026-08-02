@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt } from './ai-prompts';
+import { buildChangeSetPrompt, buildRepairPrompt, buildSnapshotPrompt, PROJECT_INTRODUCTION } from './ai-prompts';
 
 describe('AI prompt construction', () => {
+  it('provides a stable project introduction without plan data or an immediate JSON request', () => {
+    expect(PROJECT_INTRODUCTION).toContain('本段仅用于理解 sixPlan，不要求你立即输出 JSON');
+    expect(PROJECT_INTRODUCTION).toContain('个人 DAG 计划管理工具');
+    expect(PROJECT_INTRODUCTION).toContain('一层有序子阶段');
+    expect(PROJECT_INTRODUCTION).toContain('最终输出要求、允许操作范围和字段格式始终以后续具体提示词为准');
+    expect(PROJECT_INTRODUCTION).not.toContain('targetPlanName');
+  });
+
   it('documents ordered steps without forcing them into every node', () => {
     const prompt = buildSnapshotPrompt('制定一个长期学习计划');
     expect(prompt).toContain('"steps"');

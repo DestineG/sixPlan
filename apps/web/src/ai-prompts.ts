@@ -11,6 +11,14 @@ export interface PromptContextNode {
   markdown?: string;
 }
 
+export const PROJECT_INTRODUCTION = `以下是后续讨论所使用的应用背景，本段仅用于理解 sixPlan，不要求你立即输出 JSON；具体任务和输出格式以后续提示词为准。
+
+sixPlan 是一个个人 DAG 计划管理工具。用户通过“领域”组织多个计划，每个计划由节点和有向边组成。节点表示可以独立管理的阶段，边表示前后依赖关系，计划必须保持为无环有向图。
+
+节点包含名称、状态、开始日期、结束日期、简短说明、Markdown 附加信息和画布坐标。节点内部还可以包含一层有序子阶段，用于表示该节点内部按顺序执行的多个步骤。子阶段不参与 DAG 连线、不能继续嵌套，也不包含 Markdown；并行、分支、跨节点依赖或多层结构应继续使用普通节点和边表达。
+
+sixPlan 支持创建全新计划，以及通过增量变更扩展现有计划。应用本身不连接大模型，而是生成包含当前上下文、业务规则和 JSON 协议的提示词，再校验模型返回的 JSON。最终输出要求、允许操作范围和字段格式始终以后续具体提示词为准。`;
+
 export interface PromptContext {
   plan: { name: string; description: string; status: string; graphRevision: number };
   scope: 'all' | 'leaves' | 'custom';

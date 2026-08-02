@@ -180,6 +180,7 @@ test('AI 提示词、快照和增量 JSON 工作流', async ({ page }) => {
 
   await page.getByRole('button', { name: '导入', exact: true }).click();
   await page.getByRole('menuitem', { name: 'AI 生成新计划' }).click();
+  await expect(page.getByRole('button', { name: '复制项目说明' })).toBeVisible();
   await page.getByLabel('你的想法').fill('创建一个包含基础阶段和进阶阶段的训练计划');
   await page.getByText('高级选项').click();
   await page.getByLabel('建议领域').fill('AI 训练');
@@ -201,6 +202,7 @@ test('AI 提示词、快照和增量 JSON 工作流', async ({ page }) => {
 
   await page.getByRole('button', { name: '导入', exact: true }).click();
   await page.getByRole('menuitem', { name: 'AI 扩展现有计划' }).click();
+  await expect(page.getByRole('button', { name: '复制项目说明' })).toBeVisible();
   await expect(page.getByLabel('目标计划')).toHaveValue(/.+/);
   await page.getByLabel('你的想法').fill('在基础阶段后增加进阶阶段');
   await page.getByText('上下文设置').click();
