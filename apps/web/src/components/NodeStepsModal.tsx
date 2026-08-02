@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { ArrowDown, ArrowUp, CalendarPlus, GripVertical, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, CalendarDays, CalendarPlus, CalendarX, GripVertical, Plus, Trash2 } from 'lucide-react';
 import { nodeStatusLabels, type GraphDto, type NodeDto, type NodeStepDto } from '@sixplan/shared';
 import { toast } from 'sonner';
 import { api, ApiClientError } from '../api';
-import { deriveDateManagedNodeStatus, localToday } from '../date-utils';
+import { addToDateOnly, deriveDateManagedNodeStatus, localToday, type DateIncrementUnit } from '../date-utils';
 import { createRandomHex } from '../random';
 import { Modal } from './Dialogs';
 
@@ -130,6 +130,19 @@ export function NodeStepsModal({ node, readOnly, onClose, onUpdated, onPlanUpdat
   }
 
   const selected = steps.find((step) => step.id === selectedId) ?? null;
+  function setStartDateToToday() {
+    if (!selected) return;
+    const today = localToday();
+    updateSteps(stepsRef.current.map((step) => step.id === selected.id ? { ...step, startDate: today, endDate: step.endDate && step.endDate < today ? null : step.endDate, status: deriveDateManagedNodeStatus(step.status, today, today) } : step)); scheduleSave();
+  }
+  function clearDates() {
+    if (!selected) return;
+    updateSteps(stepsRef.current.map((step) => step.id === selected.id ? { ...step, startDate: null, endDate: null, status: deriveDateManagedNodeStatus(step.status, null, localToday()) } : step)); scheduleSave();
+  }
+  function setEndDateFromStart(amount: number, unit: DateIncrementUnit) {
+    if (!selected?.startDate) return;
+    updateSteps(stepsRef.current.map((step) => step.id === selected.id && step.startDate ? { ...step, endDate: addToDateOnly(step.startDate, amount, unit), status: deriveDateManagedNodeStatus(step.status, step.startDate, localToday()) } : step)); scheduleSave();
+  }
   function insertTodayIntoSummary() {
     const input = summaryInput.current;
     if (!selected || !input || document.activeElement !== input) { toast.error('请先将光标放入简短说明'); return; }
@@ -155,6 +168,12 @@ export function NodeStepsModal({ node, readOnly, onClose, onUpdated, onPlanUpdat
         <label>名称<input value={selected.title} maxLength={200} disabled={readOnly} onChange={change('title')} /></label>
         <label>状态<select value={selected.status} disabled={readOnly} onChange={change('status')}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <div className="date-fields"><label>开始日期<input type="date" value={selected.startDate ?? ''} disabled={readOnly} onChange={change('startDate')} /></label><label>结束日期<input type="date" value={selected.endDate ?? ''} disabled={readOnly} onChange={change('endDate')} /></label></div>
+        {!readOnly && <div className="date-shortcuts"><div className="date-primary-shortcuts"><button className="secondary-button today-shortcut" onClick={setStartDateToToday}><CalendarDays size={16} />开始日期设为今天</button><button className="secondary-button clear-date-shortcut" disabled={!selected.startDate && !selected.endDate} onClick={clearDates}><CalendarX size={16} />清除</button></div><div className="duration-shortcuts">
+          <button className="secondary-button" disabled={!selected.startDate} onClick={() => setEndDateFromStart(1, 'day')}>1天后</button>
+          <button className="secondary-button" disabled={!selected.startDate} onClick={() => setEndDateFromStart(1, 'week')}>一周后</button>
+          <button className="secondary-button" disabled={!selected.startDate} onClick={() => setEndDateFromStart(1, 'month')}>一个月后</button>
+          <button className="secondary-button" disabled={!selected.startDate} onClick={() => setEndDateFromStart(3, 'month')}>三个月后</button>
+        </div></div>}
         <div className="summary-field"><div className="field-label-row"><label htmlFor={`step-summary-${selected.id}`}>简短说明</label>{!readOnly && <button type="button" className="mini-icon" title="在光标处插入当前日期" aria-label="插入子阶段当前日期" onMouseDown={(event) => event.preventDefault()} onClick={insertTodayIntoSummary}><CalendarPlus size={15} /></button>}</div><textarea ref={summaryInput} id={`step-summary-${selected.id}`} rows={6} maxLength={2000} value={selected.summary} disabled={readOnly} onChange={change('summary')} /></div>
       </> : <div className="panel-empty"><p>选择一个子阶段查看详情</p></div>}</div>
     </div>
