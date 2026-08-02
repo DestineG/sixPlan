@@ -81,11 +81,11 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   const startDate = await page.getByLabel('开始日期').inputValue();
   const initialEndDate = await page.getByLabel('结束日期').inputValue();
   expect(startDate).toBeTruthy(); expect(initialEndDate).toBe('');
-  await page.getByRole('button', { name: '1天后', exact: true }).click();
+  await page.getByRole('button', { name: '+1天', exact: true }).click();
   const oneDayEndDate = await page.getByLabel('结束日期').inputValue();
   expect(oneDayEndDate).not.toBe(startDate);
-  await page.getByRole('button', { name: '1天后', exact: true }).click();
-  await expect(page.getByLabel('结束日期')).toHaveValue(oneDayEndDate);
+  await page.getByRole('button', { name: '+1天', exact: true }).click();
+  expect(await page.getByLabel('结束日期').inputValue()).not.toBe(oneDayEndDate);
   await expect(page.getByText('已保存')).toBeVisible();
   await page.getByRole('button', { name: '清除', exact: true }).click();
   await expect(page.getByLabel('开始日期')).toHaveValue('');
@@ -107,7 +107,7 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await stepModal.getByRole('button', { name: '插入子阶段当前日期' }).click();
   await expect(stepSummaryInput).toHaveValue(/^整理本阶段错题\d{4}-\d{2}-\d{2}$/);
   await stepModal.getByRole('button', { name: '开始日期设为今天' }).click();
-  await stepModal.getByRole('button', { name: '一周后', exact: true }).click();
+  await stepModal.getByRole('button', { name: '+一周', exact: true }).click();
   await expect(stepModal.getByLabel('开始日期')).not.toHaveValue('');
   await expect(stepModal.getByLabel('结束日期')).not.toHaveValue('');
   await expect(stepModal.getByText('已保存')).toBeVisible();
