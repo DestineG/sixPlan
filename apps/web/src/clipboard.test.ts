@@ -28,4 +28,18 @@ describe('copyText', () => {
     expect(input.value).toBe('局域网提示词');
     expect(input.remove).toHaveBeenCalled();
   });
+
+  it('uses a visible fallback target without removing it', async () => {
+    const input = { value: '项目说明', focus: vi.fn(), select: vi.fn(), setSelectionRange: vi.fn(), remove: vi.fn() };
+    const documentStub = { createElement: vi.fn(), body: { append: vi.fn() }, execCommand: vi.fn(() => false) };
+    vi.stubGlobal('window', { isSecureContext: false });
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('document', documentStub);
+    const { copyText } = await import('./clipboard');
+    await expect(copyText('项目说明', input as unknown as HTMLTextAreaElement)).rejects.toThrow('COPY_NOT_AVAILABLE');
+    expect(documentStub.createElement).not.toHaveBeenCalled();
+    expect(input.focus).toHaveBeenCalled();
+    expect(input.select).toHaveBeenCalled();
+    expect(input.remove).not.toHaveBeenCalled();
+  });
 });

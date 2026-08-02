@@ -34,7 +34,7 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
   mode: Mode | null; areas: AreaDto[]; onClose: () => void; onApplied: (plan: PlanDto) => Promise<void>;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
-  const promptOutput = useRef<HTMLTextAreaElement>(null); const repairOutput = useRef<HTMLTextAreaElement>(null);
+  const promptOutput = useRef<HTMLTextAreaElement>(null); const repairOutput = useRef<HTMLTextAreaElement>(null); const projectIntroOutput = useRef<HTMLTextAreaElement>(null);
   const [idea, setIdea] = useState(''); const [areaHint, setAreaHint] = useState(''); const [planId, setPlanId] = useState('');
   const [overview, setOverview] = useState<PromptContext | null>(null); const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [generatedTargetKeys, setGeneratedTargetKeys] = useState<string[]>([]); const [includeMarkdown, setIncludeMarkdown] = useState(false);
@@ -43,6 +43,7 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
   const [preview, setPreview] = useState<ImportPreviewDto | null>(null); const [repairPrompt, setRepairPrompt] = useState('');
   const [areaMode, setAreaMode] = useState<'existing' | 'create'>('existing'); const [targetAreaId, setTargetAreaId] = useState('');
   const [createAreaName, setCreateAreaName] = useState(''); const [busy, setBusy] = useState(false);
+  const [showProjectIntroFallback, setShowProjectIntroFallback] = useState(false);
 
   useEffect(() => {
     if (!mode) return;
@@ -52,6 +53,7 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
     if (!mode) return;
     setIdea(''); setAreaHint(''); setPrompt(''); setRaw(''); setPreview(null); setRepairPrompt(''); setOverview(null);
     setSelectedKeys([]); setGeneratedTargetKeys([]); setIncludeMarkdown(false); setAdvancedOpen(false);
+    setShowProjectIntroFallback(false);
     setAreaMode('existing'); setTargetAreaId(areas[0]?.id ?? ''); setCreateAreaName('');
   }, [areas, mode]);
   useEffect(() => {
@@ -110,8 +112,21 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
     setRepairPrompt('');
   }
   async function copy(value: string, output?: HTMLTextAreaElement | null) {
-    try { await copyText(value); toast.success('已复制到剪贴板'); }
-    catch { output?.focus(); output?.select(); toast.error('浏览器阻止了自动复制，内容已选中'); }
+    try { await copyText(value, output ?? undefined); toast.success('已复制到剪贴板'); return true; }
+    catch {
+      if (output) { output.focus(); output.select(); output.setSelectionRange(0, value.length); toast.error('浏览器阻止了自动复制，请按 Ctrl+C'); }
+      else toast.error('浏览器阻止了自动复制');
+      return false;
+    }
+  }
+  async function copyProjectIntroduction() {
+    const needsVisibleFallback = !window.isSecureContext || showProjectIntroFallback;
+    if (needsVisibleFallback) setShowProjectIntroFallback(true);
+    const copied = await copy(PROJECT_INTRODUCTION, projectIntroOutput.current);
+    if (!copied && !showProjectIntroFallback) setShowProjectIntroFallback(true);
+    if (needsVisibleFallback || !copied) window.requestAnimationFrame(() => {
+      projectIntroOutput.current?.focus(); projectIntroOutput.current?.select(); projectIntroOutput.current?.setSelectionRange(0, PROJECT_INTRODUCTION.length);
+    });
   }
 
   async function validate(content: string, sourceName = 'pasted.json') {
@@ -195,7 +210,8 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
             {selectedKeys.length > 200 && <div className="notice warning">当前选择包含 {selectedKeys.length} 个节点，生成的上下文可能超过部分模型的输入限制。</div>}
             {includeMarkdown && selectedMarkdownBytes > 200 * 1024 && <div className="notice warning">目标节点 Markdown 约 {formatBytes(selectedMarkdownBytes)}，请确认外部模型的上下文容量足够。</div>}</>}
         </details>
-        <div className="inline-actions"><button className="secondary-button" onClick={() => copy(PROJECT_INTRODUCTION)}><BookOpenText size={17} />复制项目说明</button><button className="primary-button" disabled={busy || contextBusy || (mode === 'changeset' && (!selectedPlan || !selectedKeys.length))} onClick={makePrompt}><Sparkles size={17} />{contextBusy ? '正在构造' : '构造提示词'}</button></div>
+        <div className="inline-actions"><button className="primary-button" disabled={busy || contextBusy || (mode === 'changeset' && (!selectedPlan || !selectedKeys.length))} onClick={makePrompt}><Sparkles size={17} />{contextBusy ? '正在构造' : '构造提示词'}</button><button className="secondary-button" onClick={() => void copyProjectIntroduction()}><BookOpenText size={17} />复制项目说明</button></div>
+        {showProjectIntroFallback && <div className="copy-fallback"><label>项目说明<textarea ref={projectIntroOutput} rows={7} value={PROJECT_INTRODUCTION} readOnly /></label><div className="copy-fallback-footer"><span>内容已全选；自动复制未生效时请按 Ctrl+C。</span><button className="secondary-button" onClick={() => downloadText(PROJECT_INTRODUCTION, 'sixplan-project-introduction.txt')}><Download size={16} />下载 TXT</button></div></div>}
       </section>
 
       {prompt && <section className="ai-step"><div className="ai-step-title"><span>2</span><strong>交给外部大模型</strong></div>
