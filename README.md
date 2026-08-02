@@ -42,23 +42,44 @@ npm start
 
 ## Docker Compose
 
-仅启动局域网 HTTP：
+默认只启动局域网 HTTP：
 
 ```bash
 docker compose up -d --build
 ```
 
-默认访问 `http://本地服务器IP:4173`，SQLite、备份和导出文件保存在 Docker volume 中。
+访问 `http://本地服务器IP:4173`。停止服务：
 
-启用本地 HTTPS 网关，同时保留局域网 HTTP：
+```bash
+docker compose down
+```
+
+SQLite、备份和导出文件保存在 Docker volume 中，普通的 `down` 不会删除数据。
+
+需要同时启用公网 HTTPS 和局域网 HTTP 时，创建 `.env`：
 
 ```bash
 cp -n .env.example .env
 nano .env
-docker compose -f compose.yaml -f compose.https.yaml up -d --build
 ```
 
-启动前必须把 `.env` 中的 `SIXPLAN_HTTPS_HOST` 改为浏览器最终访问的公网 IPv4，并填写 `ACME_EMAIL`。HTTPS 模式只在本地服务器增加 Caddy，不包含任何公网转发工具；云服务器只需把公网 TCP `80/443` 透明转发到本地服务器的 TCP `80/443`。按设备划分的完整步骤、验证方法和故障排查见 [Docker 部署指南](deploy/README.md)。
+在 `.env` 中启用并填写：
+
+```dotenv
+COMPOSE_PATH_SEPARATOR=:
+COMPOSE_FILE=compose.yaml:compose.https.yaml
+SIXPLAN_HTTPS_HOST=浏览器最终访问的公网IPv4
+ACME_EMAIL=证书通知邮箱
+```
+
+此后启动和停止 HTTPS 部署也使用普通命令：
+
+```bash
+docker compose up -d --build
+docker compose down
+```
+
+HTTPS 模式只在本地服务器增加 Caddy，不包含任何公网转发工具；云服务器只需把公网 TCP `80/443` 透明转发到本地服务器的 TCP `80/443`。完整步骤、验证方法和故障排查见 [Docker 部署指南](deploy/README.md)。
 
 ## 管理员命令
 
@@ -85,6 +106,8 @@ npm run admin -- promote username
 | `SIXPLAN_PORT` | `4173` | 服务端口 |
 | `SIXPLAN_DATA_DIR` | 系统应用数据目录下的 `sixplan` | 数据库、备份和导出文件目录 |
 | `SIXPLAN_DATA_VOLUME` | `sixplan-data` | Docker 数据卷名称；部署不同版本时应分别设置 |
+| `COMPOSE_PATH_SEPARATOR` | 无 | HTTPS 部署设为 `:`，统一不同系统的 Compose 文件分隔符 |
+| `COMPOSE_FILE` | 无 | HTTPS 部署设为 `compose.yaml:compose.https.yaml` |
 | `SIXPLAN_HTTPS_HOST` | 无 | HTTPS 证书对应的公网 IPv4；仅用于 `compose.https.yaml` |
 | `SIXPLAN_HTTPS_BIND` | `0.0.0.0` | Caddy 在宿主机上的监听地址 |
 | `SIXPLAN_HTTPS_HTTP_PORT` | `80` | Caddy 的 HTTP 校验和跳转端口 |
