@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { ArrowDown, ArrowUp, GripVertical, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, CalendarPlus, GripVertical, Plus, Trash2 } from 'lucide-react';
 import { nodeStatusLabels, type GraphDto, type NodeDto, type NodeStepDto } from '@sixplan/shared';
 import { toast } from 'sonner';
 import { api, ApiClientError } from '../api';
@@ -25,7 +25,7 @@ export function NodeStepsModal({ node, readOnly, onClose, onUpdated, onPlanUpdat
   const [steps, setSteps] = useState<DraftStep[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const stepsRef = useRef<DraftStep[]>([]); const nodeVersion = useRef(0); const dirty = useRef(false);
+  const stepsRef = useRef<DraftStep[]>([]); const nodeVersion = useRef(0); const dirty = useRef(false); const summaryInput = useRef<HTMLTextAreaElement>(null);
   const timer = useRef<number | null>(null); const inFlight = useRef<Promise<void> | null>(null); const dragId = useRef(''); const initializedNodeId = useRef(''); const selectedKey = useRef('');
 
   useEffect(() => {
@@ -130,6 +130,15 @@ export function NodeStepsModal({ node, readOnly, onClose, onUpdated, onPlanUpdat
   }
 
   const selected = steps.find((step) => step.id === selectedId) ?? null;
+  function insertTodayIntoSummary() {
+    const input = summaryInput.current;
+    if (!selected || !input || document.activeElement !== input) { toast.error('请先将光标放入简短说明'); return; }
+    const start = input.selectionStart; const end = input.selectionEnd; const today = localToday();
+    const summary = `${selected.summary.slice(0, start)}${today}${selected.summary.slice(end)}`;
+    if (summary.length > 2000) { toast.error('插入后将超过简短说明的 2000 字限制'); return; }
+    updateSteps(stepsRef.current.map((step) => step.id === selected.id ? { ...step, summary } : step)); scheduleSave();
+    requestAnimationFrame(() => { input.focus(); const caret = start + today.length; input.setSelectionRange(caret, caret); });
+  }
   return <Modal open={Boolean(node)} onOpenChange={(open) => { if (!open) void close(); }} title={readOnly ? '查看子阶段' : '管理子阶段'}
     description="子阶段是节点内部的一层有序步骤，不参与 DAG 连线。" wide>
     <div className="step-modal-toolbar"><span>{steps.length} 个子阶段</span><small className={`save-state ${saveState}`}>{saveState === 'saving' ? '保存中' : saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : ''}</small>
@@ -146,7 +155,7 @@ export function NodeStepsModal({ node, readOnly, onClose, onUpdated, onPlanUpdat
         <label>名称<input value={selected.title} maxLength={200} disabled={readOnly} onChange={change('title')} /></label>
         <label>状态<select value={selected.status} disabled={readOnly} onChange={change('status')}>{Object.entries(nodeStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <div className="date-fields"><label>开始日期<input type="date" value={selected.startDate ?? ''} disabled={readOnly} onChange={change('startDate')} /></label><label>结束日期<input type="date" value={selected.endDate ?? ''} disabled={readOnly} onChange={change('endDate')} /></label></div>
-        <label>简短说明<textarea rows={6} maxLength={2000} value={selected.summary} disabled={readOnly} onChange={change('summary')} /></label>
+        <div className="summary-field"><div className="field-label-row"><label htmlFor={`step-summary-${selected.id}`}>简短说明</label>{!readOnly && <button type="button" className="mini-icon" title="在光标处插入当前日期" aria-label="插入子阶段当前日期" onMouseDown={(event) => event.preventDefault()} onClick={insertTodayIntoSummary}><CalendarPlus size={15} /></button>}</div><textarea ref={summaryInput} id={`step-summary-${selected.id}`} rows={6} maxLength={2000} value={selected.summary} disabled={readOnly} onChange={change('summary')} /></div>
       </> : <div className="panel-empty"><p>选择一个子阶段查看详情</p></div>}</div>
     </div>
     <div className="dialog-actions"><button className="primary-button" onClick={() => void close()}>完成</button></div>

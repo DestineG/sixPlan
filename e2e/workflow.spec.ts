@@ -98,7 +98,11 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await expect(stepModal.getByText('已保存')).toBeVisible();
   await stepModal.getByRole('button', { name: '添加子阶段' }).click();
   await stepModal.getByLabel('名称').fill('完成综合练习');
-  await stepModal.getByLabel('简短说明').fill('整理本阶段错题');
+  const stepSummaryInput = stepModal.getByLabel('简短说明');
+  await stepSummaryInput.fill('整理本阶段错题');
+  await stepSummaryInput.press('End');
+  await stepModal.getByRole('button', { name: '插入子阶段当前日期' }).click();
+  await expect(stepSummaryInput).toHaveValue(/^整理本阶段错题\d{4}-\d{2}-\d{2}$/);
   await expect(stepModal.getByText('已保存')).toBeVisible();
   await stepModal.getByTitle('上移').last().click();
   await expect(stepModal.getByText('已保存')).toBeVisible();
