@@ -1,14 +1,15 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { CalendarRange, KeyRound, LogIn, UserPlus } from 'lucide-react';
+import { KeyRound, LogIn, UserPlus } from 'lucide-react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import type { UserDto } from '@sixplan/shared';
 import { api, ApiClientError } from '../api';
 import { useAuthStore } from '../auth-store';
+import { BrandMark } from '../components/BrandMark';
 
 function AuthFrame({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
   return <div className="auth-page"><section className="auth-panel">
-    <div className="auth-brand"><span className="brand-mark"><CalendarRange size={21} /></span><strong>sixPlan</strong></div>
+    <div className="auth-brand"><BrandMark /><strong>sixPlan</strong></div>
     <div><h1>{title}</h1><p>{subtitle}</p></div>{children}
   </section></div>;
 }

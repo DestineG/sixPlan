@@ -1,0 +1,15 @@
+{
+  "name": "sixPlan",
+  "short_name": "sixPlan",
+  "icons": [
+    {
+      "src": "/sixplan-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "theme_color": "#147d75",
+  "background_color": "#f4f6f7",
+  "display": "standalone"
+}

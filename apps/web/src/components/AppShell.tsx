@@ -1,7 +1,8 @@
-import { Archive, CalendarRange, LogOut, Settings, ShieldCheck } from 'lucide-react';
+import { Archive, LogOut, Settings, ShieldCheck } from 'lucide-react';
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useAuthStore } from '../auth-store';
+import { BrandMark } from './BrandMark';
 
 export function AppShell() {
   const user = useAuthStore((state) => state.user)!;
@@ -16,7 +17,7 @@ export function AppShell() {
     <div className="app-shell">
       <header className="topbar">
         <Link className="brand" to="/" aria-label="sixPlan 计划总览">
-          <span className="brand-mark"><CalendarRange size={19} /></span>
+          <BrandMark />
           <span>sixPlan</span>
         </Link>
         <nav className="topnav" aria-label="主导航">
