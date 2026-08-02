@@ -3,10 +3,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow, type Connection, type Edge, type Node, type NodeTypes } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
-import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, CalendarDays, CalendarX, Copy, Download, ListOrdered, Plus, Trash2 } from 'lucide-react';
+import { AlignHorizontalSpaceAround, ArrowLeft, BookOpenText, Bot, CalendarDays, CalendarX, Copy, Download, ListOrdered, Plus, Trash2 } from 'lucide-react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { nodeStatusLabels, planStatusLabels, type EdgeDto, type GraphDto, type NodeDto, type PlanStatus } from '@sixplan/shared';
+import { nodeStatusLabels, planStatusLabels, type AreaDto, type EdgeDto, type GraphDto, type NodeDto, type PlanStatus } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile } from '../api';
 import { copyText } from '../clipboard';
 import { PlanNodeCard, type PlanNodeData } from '../components/PlanNodeCard';
@@ -16,7 +16,9 @@ import { addToDateOnly, deriveDateManagedNodeStatus, isNodeOverdue, localToday, 
 type FlowNode = Node<PlanNodeData, 'planNode'>;
 type FlowEdge = Edge<{ edge: EdgeDto }>;
 const nodeTypes: NodeTypes = { planNode: PlanNodeCard };
+const noAreas: AreaDto[] = [];
 const MarkdownModal = lazy(() => import('../components/MarkdownModal').then((module) => ({ default: module.MarkdownModal })));
+const AiPlanModal = lazy(() => import('../components/AiPlanModal').then((module) => ({ default: module.AiPlanModal })));
 
 function isMobileViewport() { return window.matchMedia('(max-width: 760px)').matches; }
 
@@ -27,6 +29,7 @@ function GraphWorkspace() {
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]); const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null); const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [markdownNode, setMarkdownNode] = useState<NodeDto | null>(null); const [stepsNodeId, setStepsNodeId] = useState<string | null>(null); const [mobile, setMobile] = useState(isMobileViewport);
+  const [aiExtendOpen, setAiExtendOpen] = useState(false);
   const [statusDate, setStatusDate] = useState(localToday);
   const [savingPlanStatus, setSavingPlanStatus] = useState<PlanStatus | null>(null);
   const lastReconciledDay = useRef<string | null>(null);
@@ -140,7 +143,7 @@ function GraphWorkspace() {
   if (!graph) return <div className="error-state">计划图加载失败。<Link to="/">返回总览</Link></div>;
   return <div className="graph-page">
     <header className="graph-toolbar"><div className="graph-title"><Link className="icon-button" to={graph.plan.archivedAt ? '/?view=archived' : '/'} title="返回计划总览"><ArrowLeft size={18} /></Link><div className="graph-title-copy"><span>{graph.plan.areaName}</span><h1>{graph.plan.name}</h1></div>{!readOnly ? <label className="plan-status-control"><span>计划状态</span><select aria-label="计划状态" value={savingPlanStatus ?? graph.plan.status} disabled={Boolean(savingPlanStatus)} onChange={(event) => void changePlanStatus(event.target.value as PlanStatus)}>{Object.entries(planStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : <span className={`status-pill status-${graph.plan.status}`}>{planStatusLabels[graph.plan.status]}</span>}{graph.plan.archivedAt && <span className="archived-badge">已归档</span>}{mobile && <span className="readonly-badge">移动端只读</span>}</div>
-      <div className="graph-actions">{!readOnly && <><button className="secondary-button" onClick={addNode}><Plus size={17} />添加节点</button><button className="secondary-button" onClick={layout} disabled={nodes.length === 0}><AlignHorizontalSpaceAround size={17} />自动布局</button><button className="danger-ghost-button" onClick={removeSelected} disabled={!selectedNodeId && !selectedEdgeId}><Trash2 size={17} />删除所选</button></>}<button className="secondary-button" onClick={() => downloadFile(`/api/plans/${planId}/export`).catch(showError)}><Download size={17} />导出</button></div></header>
+      <div className="graph-actions">{!readOnly && <><button className="secondary-button" onClick={addNode}><Plus size={17} />添加节点</button><button className="secondary-button" onClick={layout} disabled={nodes.length === 0}><AlignHorizontalSpaceAround size={17} />自动布局</button><button className="danger-ghost-button" onClick={removeSelected} disabled={!selectedNodeId && !selectedEdgeId}><Trash2 size={17} />删除所选</button><button className="secondary-button" title="AI 扩展现有计划" onClick={() => setAiExtendOpen(true)}><Bot size={17} />AI 扩展</button></>}<button className="secondary-button" onClick={() => downloadFile(`/api/plans/${planId}/export`).catch(showError)}><Download size={17} />导出</button></div></header>
     {readOnly && <div className="readonly-strip">{graph.plan.archivedAt ? '归档计划为只读状态。恢复后才能继续编辑。' : '移动端提供只读查看，请在桌面浏览器中编辑计划图。'}</div>}
     <div className="graph-body"><section className="graph-canvas"><ReactFlow<FlowNode, FlowEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
       onConnect={connect} onNodeDragStop={(_, node) => savePosition(node)} onNodeClick={(_, node) => { setSelectedNodeId(node.id); setSelectedEdgeId(null); }} onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedNodeId(null); }}
@@ -149,6 +152,7 @@ function GraphWorkspace() {
       <Background gap={22} size={1} color="#d8dee2" /><MiniMap pannable zoomable nodeStrokeWidth={3} /><Controls showInteractive={false} /></ReactFlow></section>
       <aside className={`node-panel ${selectedNode ? 'open' : ''}`}>{selectedNode ? <NodeDetail key={selectedNode.id} node={selectedNode} readOnly={readOnly} onUpdated={updateNode} onPlanUpdated={applyPlanUpdate} onMarkdown={() => setMarkdownNode(selectedNode)} onSteps={() => setStepsNodeId(selectedNode.id)} /> : <div className="panel-empty"><BookOpenText size={24} /><p>选择一个节点查看详情</p></div>}</aside></div>
     {markdownNode && <Suspense fallback={<div className="modal-loader"><span className="spinner" />加载编辑器</div>}><MarkdownModal node={markdownNode} readOnly={readOnly} onClose={() => setMarkdownNode(null)} onSaved={updateNode} /></Suspense>}
+    {aiExtendOpen && <Suspense fallback={<div className="modal-loader"><span className="spinner" />加载 AI 工作台</div>}><AiPlanModal mode="changeset" areas={noAreas} initialPlanId={planId} onClose={() => setAiExtendOpen(false)} onApplied={async () => { await Promise.all([refresh(), refreshOverview()]); }} /></Suspense>}
     <NodeStepsModal node={stepsNode} readOnly={readOnly} onClose={() => setStepsNodeId(null)} onUpdated={updateNode} onPlanUpdated={applyPlanUpdate} />
   </div>;
 }

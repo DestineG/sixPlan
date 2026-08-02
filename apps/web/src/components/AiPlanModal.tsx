@@ -30,12 +30,12 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function AiPlanModal({ mode, areas, onClose, onApplied }: {
-  mode: Mode | null; areas: AreaDto[]; onClose: () => void; onApplied: (plan: PlanDto) => Promise<void>;
+export function AiPlanModal({ mode, areas, initialPlanId, onClose, onApplied }: {
+  mode: Mode | null; areas: AreaDto[]; initialPlanId?: string; onClose: () => void; onApplied: (plan: PlanDto) => Promise<void>;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const promptOutput = useRef<HTMLTextAreaElement>(null); const repairOutput = useRef<HTMLTextAreaElement>(null); const projectIntroOutput = useRef<HTMLTextAreaElement>(null);
-  const [idea, setIdea] = useState(''); const [areaHint, setAreaHint] = useState(''); const [planId, setPlanId] = useState('');
+  const [idea, setIdea] = useState(''); const [areaHint, setAreaHint] = useState(''); const [planId, setPlanId] = useState(initialPlanId ?? '');
   const [overview, setOverview] = useState<PromptContext | null>(null); const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [generatedTargetKeys, setGeneratedTargetKeys] = useState<string[]>([]); const [includeMarkdown, setIncludeMarkdown] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false); const [contextBusy, setContextBusy] = useState(false);
@@ -47,8 +47,11 @@ export function AiPlanModal({ mode, areas, onClose, onApplied }: {
 
   useEffect(() => {
     if (!mode) return;
-    api<{ plans: PlanDto[] }>('/api/plans').then(({ plans: values }) => { setPlans(values); setPlanId((current) => current || values[0]?.id || ''); }).catch(() => undefined);
-  }, [mode]);
+    api<{ plans: PlanDto[] }>('/api/plans').then(({ plans: values }) => { setPlans(values); setPlanId((current) => {
+      if (initialPlanId && values.some((plan) => plan.id === initialPlanId)) return initialPlanId;
+      return values.some((plan) => plan.id === current) ? current : values[0]?.id ?? '';
+    }); }).catch(() => undefined);
+  }, [initialPlanId, mode]);
   useEffect(() => {
     if (!mode) return;
     setIdea(''); setAreaHint(''); setPrompt(''); setRaw(''); setPreview(null); setRepairPrompt(''); setOverview(null);

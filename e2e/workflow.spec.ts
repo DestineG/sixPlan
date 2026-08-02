@@ -42,6 +42,12 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByLabel('计划状态', { exact: true }).selectOption('planning');
   await expect(page.getByText('计划状态已更新').last()).toBeVisible();
 
+  await page.getByRole('button', { name: 'AI 扩展' }).click();
+  const graphAiModal = page.locator('.dialog-content').filter({ hasText: 'AI 扩展现有计划' });
+  await expect(graphAiModal.getByLabel('目标计划')).toHaveValue(/.+/);
+  await expect(graphAiModal.getByLabel('目标计划').locator('option:checked')).toHaveText(/实习准备/);
+  await graphAiModal.getByRole('button', { name: '关闭' }).click();
+
   await page.getByRole('button', { name: '添加节点' }).click();
   await page.getByRole('button', { name: '添加节点' }).click();
   await expect(page.locator('.graph-node')).toHaveCount(2);
@@ -127,6 +133,7 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('button', { name: /实习准备/ }).click();
   await expect(page.getByText('归档计划为只读状态。恢复后才能继续编辑。')).toBeVisible();
   await expect(page.getByRole('button', { name: '添加节点' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'AI 扩展' })).toHaveCount(0);
   await expect(page.getByLabel('计划状态')).toHaveCount(0);
   await page.getByTitle('返回计划总览').click();
   await page.getByLabel('计划操作').click();
@@ -154,6 +161,7 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await page.getByRole('button', { name: /实习准备/ }).click();
   await expect(page.getByText('移动端只读')).toBeVisible();
   await expect(page.getByRole('button', { name: '添加节点' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'AI 扩展' })).toHaveCount(0);
   await expect(page.getByLabel('计划状态')).toHaveCount(0);
   await expect(page.locator('.graph-node').first()).toBeVisible();
   await page.locator('.graph-node').first().click();
