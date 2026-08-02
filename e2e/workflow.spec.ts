@@ -172,7 +172,18 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await expect(page.getByRole('button', { name: /工作（导入）/ }).first()).toBeVisible();
   await page.getByRole('button', { name: /活跃计划/ }).click();
   await expect(page.locator('.active-area-group')).toHaveCount(2);
+  const desktopGroupBoxes = await page.locator('.active-area-group').evaluateAll((groups) => groups.map((group) => {
+    const box = group.getBoundingClientRect(); return { x: box.x, y: box.y };
+  }));
+  expect(Math.abs(desktopGroupBoxes[0]!.y - desktopGroupBoxes[1]!.y)).toBeLessThan(4);
+  expect(desktopGroupBoxes[1]!.x).toBeGreaterThan(desktopGroupBoxes[0]!.x);
   await page.screenshot({ path: 'test-results/desktop-active-plans-grouped.png', fullPage: true });
+
+  await page.getByRole('link', { name: '设置' }).click();
+  await page.getByLabel('每个计划显示的活跃节点数').selectOption('7');
+  await page.getByRole('button', { name: '保存显示设置' }).click();
+  await expect(page.getByText('总览显示设置已保存')).toBeVisible();
+  await page.getByRole('link', { name: '计划', exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: /^工作 \d+$/ }).click();
@@ -200,6 +211,11 @@ test('核心计划工作流和移动只读视图', async ({ page }) => {
   await expect(activeGroups.nth(1).getByRole('heading', { name: '工作（导入）' })).toBeVisible();
   await expect(activeGroups.nth(0).locator('.plan-card')).toHaveCount(1);
   await expect(activeGroups.nth(1).locator('.plan-card')).toHaveCount(1);
+  const mobileGroupBoxes = await activeGroups.evaluateAll((groups) => groups.map((group) => {
+    const box = group.getBoundingClientRect(); return { x: box.x, y: box.y };
+  }));
+  expect(mobileGroupBoxes[1]!.y).toBeGreaterThan(mobileGroupBoxes[0]!.y);
+  expect(Math.abs(mobileGroupBoxes[0]!.x - mobileGroupBoxes[1]!.x)).toBeLessThan(4);
   await page.screenshot({ path: 'test-results/mobile-active-plans.png', fullPage: true });
 });
 

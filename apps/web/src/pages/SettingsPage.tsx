@@ -7,6 +7,7 @@ import type { UserDto } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile, uploadBackup } from '../api';
 import { useAuthStore } from '../auth-store';
 import { ImportSettingsSection } from '../components/ImportSettingsSection';
+import { DisplaySettingsSection } from '../components/DisplaySettingsSection';
 
 function errorMessage(error: unknown) { return error instanceof ApiClientError ? error.message : '操作失败'; }
 
@@ -25,7 +26,8 @@ export function SettingsPage() {
   async function restoreSite() { const file = siteRestoreFile.current?.files?.[0]; if (!file) return toast.error('请选择全站备份文件'); if (!window.confirm('全站恢复将覆盖全部账号、设置和计划，并使所有会话失效。是否继续？')) return;
     try { await uploadBackup('/api/admin/backups/restore', file, siteRestorePassword || undefined); setUser(null); navigate('/login'); toast.success('全站恢复完成，请重新登录'); } catch (error) { toast.error(errorMessage(error)); }
   }
-  return <div className="settings-page page-container"><div className="page-heading"><div><p className="eyebrow">系统与数据</p><h1>设置</h1><p>管理账号安全、备份和本地数据目录。</p></div></div>
+  return <div className="settings-page page-container"><div className="page-heading"><div><p className="eyebrow">系统与数据</p><h1>设置</h1><p>管理显示偏好、账号安全、备份和本地数据目录。</p></div></div>
+    <DisplaySettingsSection />
     <section className="settings-section"><div className="section-intro"><KeyRound size={21} /><div><h2>修改密码</h2><p>修改后，除当前页面外的登录会话会立即失效。</p></div></div><form className="settings-form" onSubmit={changePassword}><label>当前密码<input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} required /></label><label>新密码<input type="password" minLength={8} maxLength={128} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required /></label><label>确认新密码<input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required /></label><button className="primary-button">保存密码</button></form></section>
     <section className="settings-section"><div className="section-intro"><DatabaseBackup size={21} /><div><h2>个人数据备份</h2><p>包含你的领域、普通与归档计划、节点、连接和 Markdown，不包含账号密码。</p></div></div><div className="settings-form"><label>备份密码（可选）<input type="password" minLength={backupPassword ? 8 : undefined} value={backupPassword} onChange={(e) => setBackupPassword(e.target.value)} /><small>留空生成未加密备份；系统不会保存此密码。</small></label><button className="secondary-button" onClick={() => downloadFile('/api/backups/user/export', backupPassword ? { password: backupPassword } : {}).catch((error) => toast.error(errorMessage(error)))}><DatabaseBackup size={17} />导出个人备份</button><div className="restore-row"><label>恢复文件<input ref={restoreFile} type="file" accept=".backup,.sixplan.backup" /></label><label>备份密码<input type="password" value={restorePassword} onChange={(e) => setRestorePassword(e.target.value)} /></label><button className="danger-ghost-button" onClick={restoreUser}><RotateCcw size={17} />恢复个人数据</button></div></div></section>
     <ImportSettingsSection />

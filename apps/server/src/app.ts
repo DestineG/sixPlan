@@ -12,6 +12,7 @@ import { registerDomainRoutes } from './domain-routes.js';
 import { registerTransferRoutes } from './transfer-routes.js';
 import { registerAdminRoutes } from './admin-routes.js';
 import { registerImportRoutes } from './import-routes.js';
+import { registerDisplaySettingsRoutes } from './display-settings-routes.js';
 
 function isHttpError(error: unknown): error is Error & { statusCode: number; code?: string } {
   return error instanceof Error && 'statusCode' in error && typeof error.statusCode === 'number';
@@ -41,6 +42,7 @@ export async function buildApp(config: AppConfig = loadConfig()): Promise<Fastif
   await app.register(registerDomainRoutes);
   await app.register(registerTransferRoutes);
   await app.register(registerImportRoutes);
+  await app.register(registerDisplaySettingsRoutes);
   await app.register(registerAdminRoutes);
 
   const webRoot = fileURLToPath(new URL('../../web/dist', import.meta.url));

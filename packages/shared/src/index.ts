@@ -256,6 +256,11 @@ export interface ImportSettingsDto {
   version: number;
 }
 
+export interface DisplaySettingsDto {
+  activeNodeLimit: number;
+  version: number;
+}
+
 export interface ImportPreviewDto {
   sessionId: string;
   kind: 'snapshot' | 'changeset';

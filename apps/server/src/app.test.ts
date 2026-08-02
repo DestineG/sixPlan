@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import type { InjectOptions, Response as InjectResponse } from 'light-my-request';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from './app.js';
-import type { ActivePlanDto, AreaDto, AreaFile, EdgeDto, GraphDto, ImportResult, NodeDto, PlanDto } from '@sixplan/shared';
+import type { ActivePlanDto, AreaDto, AreaFile, DisplaySettingsDto, EdgeDto, GraphDto, ImportResult, NodeDto, PlanDto } from '@sixplan/shared';
 import { collectBackup, decodeBackup, encodeBackup, restoreSiteBackup, restoreUserBackup } from './backup.js';
 import { createUser } from './auth.js';
 
@@ -130,6 +130,22 @@ describe('sixPlan API', () => {
     await request(cookie, 'PATCH', `/api/nodes/${node.id}`, { summary: '继续进行', expectedVersion: nodeAfterStart.version });
     const unchanged = (await request(cookie, 'GET', `/api/plans/${plan.id}`)).json<{ plan: PlanDto }>().plan;
     expect(unchanged.status).toBe('completed'); expect(unchanged.version).toBe(completed.version);
+  });
+
+  it('persists isolated display settings with optimistic concurrency control', async () => {
+    const alice = await register('display-alice');
+    const bob = await register('display-bob');
+    const initial = (await request(alice, 'GET', '/api/display-settings')).json<{ settings: DisplaySettingsDto }>().settings;
+    expect(initial).toEqual({ activeNodeLimit: 5, version: 1 });
+
+    const updatedResponse = await request(alice, 'PUT', '/api/display-settings', { activeNodeLimit: 8, expectedVersion: initial.version });
+    expect(updatedResponse.statusCode).toBe(200);
+    expect(updatedResponse.json<{ settings: DisplaySettingsDto }>().settings).toEqual({ activeNodeLimit: 8, version: 2 });
+    expect((await request(alice, 'PUT', '/api/display-settings', { activeNodeLimit: 4, expectedVersion: initial.version })).json())
+      .toMatchObject({ code: 'VERSION_CONFLICT' });
+    expect((await request(alice, 'PUT', '/api/display-settings', { activeNodeLimit: 11, expectedVersion: 2 })).statusCode).toBe(400);
+    expect((await request(bob, 'GET', '/api/display-settings')).json<{ settings: DisplaySettingsDto }>().settings)
+      .toEqual({ activeNodeLimit: 5, version: 1 });
   });
 
   it('manages ordered node steps, aggregates the parent and exposes active work', async () => {
@@ -443,11 +459,14 @@ describe('sixPlan API', () => {
   it('restores user data without affecting sessions and site data with all sessions revoked', async () => {
     const aliceCookie = await register('alice');
     await request(aliceCookie, 'POST', '/api/areas', { name: '保留领域' });
+    await request(aliceCookie, 'PUT', '/api/display-settings', { activeNodeLimit: 8, expectedVersion: 1 });
     const aliceId = (app.database.sqlite.prepare("SELECT id FROM users WHERE username='alice'").get() as { id: string }).id;
     const userPayload = collectBackup(app, 'user', aliceId);
     await request(aliceCookie, 'POST', '/api/areas', { name: '临时领域' });
+    await request(aliceCookie, 'PUT', '/api/display-settings', { activeNodeLimit: 3, expectedVersion: 2 });
     restoreUserBackup(app, aliceId, await decodeBackup(await encodeBackup(userPayload, 'backup-pass'), 'backup-pass'));
     expect((await request(aliceCookie, 'GET', '/api/areas')).json<{ areas: AreaDto[] }>().areas.map((area) => area.name)).toEqual(['保留领域']);
+    expect((await request(aliceCookie, 'GET', '/api/display-settings')).json<{ settings: DisplaySettingsDto }>().settings.activeNodeLimit).toBe(8);
 
     await createUser(app, 'admin', 'password123', 'admin');
     const sitePayload = collectBackup(app, 'site');

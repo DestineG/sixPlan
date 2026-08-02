@@ -107,6 +107,13 @@ export const userImportSettings = sqliteTable('user_import_settings', {
   updatedAt: text('updated_at').notNull()
 });
 
+export const userDisplaySettings = sqliteTable('user_display_settings', {
+  userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  activeNodeLimit: integer('active_node_limit').notNull().default(5),
+  version: integer('version').notNull().default(1),
+  updatedAt: text('updated_at').notNull()
+});
+
 export const importSessions = sqliteTable('import_sessions', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),

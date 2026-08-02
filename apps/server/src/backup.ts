@@ -23,6 +23,7 @@ const backupPayloadSchema = z.object({
     users: z.array(z.record(z.unknown())).optional(),
     settings: z.array(z.record(z.unknown())).optional(),
     userSettings: z.array(z.record(z.unknown())).optional(),
+    displaySettings: z.array(z.record(z.unknown())).optional(),
     areas: z.array(z.record(z.unknown())), plans: z.array(z.record(z.unknown())),
     nodes: z.array(z.record(z.unknown())), steps: z.array(z.record(z.unknown())).optional().default([]),
     edges: z.array(z.record(z.unknown()))
@@ -39,6 +40,7 @@ const tableColumns: Record<string, string[]> = {
   nodes: ['id','plan_id','node_key','title','status','start_date','end_date','summary','extra_content','position_x','position_y','version','created_at','updated_at'],
   node_steps: ['id','node_id','step_key','title','status','start_date','end_date','summary','sort_order','version','created_at','updated_at'],
   user_import_settings: ['user_id','max_nodes','max_edges','max_markdown_bytes','max_file_bytes','session_hours','version','updated_at'],
+  user_display_settings: ['user_id','active_node_limit','version','updated_at'],
   edges: ['id','plan_id','source_node_id','target_node_id','version','created_at','updated_at']
 };
 
@@ -91,9 +93,13 @@ export function collectBackup(app: FastifyInstance, scope: 'user' | 'site', user
       ...(scope === 'site' ? {
         users: app.database.sqlite.prepare('SELECT * FROM users ORDER BY created_at').all() as Record<string, unknown>[],
         settings: app.database.sqlite.prepare('SELECT * FROM system_settings').all() as Record<string, unknown>[],
-        userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings').all() as Record<string, unknown>[]
+        userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings').all() as Record<string, unknown>[],
+        displaySettings: app.database.sqlite.prepare('SELECT * FROM user_display_settings').all() as Record<string, unknown>[]
       } : {}),
-      ...(scope === 'user' ? { userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings WHERE user_id = ?').all(userId) as Record<string, unknown>[] } : {}),
+      ...(scope === 'user' ? {
+        userSettings: app.database.sqlite.prepare('SELECT * FROM user_import_settings WHERE user_id = ?').all(userId) as Record<string, unknown>[],
+        displaySettings: app.database.sqlite.prepare('SELECT * FROM user_display_settings WHERE user_id = ?').all(userId) as Record<string, unknown>[]
+      } : {}),
       areas, plans, nodes, steps, edges
     }
   };
@@ -161,6 +167,7 @@ export function restoreUserBackup(app: FastifyInstance, userId: string, payload:
     app.database.sqlite.prepare('DELETE FROM import_sessions WHERE user_id = ?').run(userId);
     app.database.sqlite.prepare('DELETE FROM areas WHERE user_id = ?').run(userId);
     app.database.sqlite.prepare('DELETE FROM user_import_settings WHERE user_id = ?').run(userId);
+    app.database.sqlite.prepare('DELETE FROM user_display_settings WHERE user_id = ?').run(userId);
     const restoredAreas = payload.data.areas.map((row) => ({ ...row, user_id: userId }));
     insertRows(app, 'areas', restoredAreas);
     insertRows(app, 'plans', payload.data.plans);
@@ -168,6 +175,7 @@ export function restoreUserBackup(app: FastifyInstance, userId: string, payload:
     insertRows(app, 'node_steps', payload.data.steps);
     insertRows(app, 'edges', payload.data.edges);
     if (payload.data.userSettings?.[0]) insertRows(app, 'user_import_settings', [{ ...payload.data.userSettings[0], user_id: userId }]);
+    if (payload.data.displaySettings?.[0]) insertRows(app, 'user_display_settings', [{ ...payload.data.displaySettings[0], user_id: userId }]);
   })();
   for (const file of importFiles) if (existsSync(file.file_path)) unlinkSync(file.file_path);
 }
@@ -178,7 +186,7 @@ export function restoreSiteBackup(app: FastifyInstance, payload: BackupPayload):
   }
   const importFiles = app.database.sqlite.prepare('SELECT file_path FROM import_sessions').all() as Array<{ file_path: string }>;
   app.database.sqlite.transaction(() => {
-    app.database.sqlite.exec('DELETE FROM sessions; DELETE FROM import_sessions; DELETE FROM edges; DELETE FROM node_steps; DELETE FROM nodes; DELETE FROM plans; DELETE FROM areas; DELETE FROM user_import_settings; DELETE FROM system_settings; DELETE FROM users;');
+    app.database.sqlite.exec('DELETE FROM sessions; DELETE FROM import_sessions; DELETE FROM edges; DELETE FROM node_steps; DELETE FROM nodes; DELETE FROM plans; DELETE FROM areas; DELETE FROM user_import_settings; DELETE FROM user_display_settings; DELETE FROM system_settings; DELETE FROM users;');
     insertRows(app, 'users', payload.data.users!);
     insertRows(app, 'system_settings', payload.data.settings!);
     insertRows(app, 'areas', payload.data.areas);
@@ -187,6 +195,7 @@ export function restoreSiteBackup(app: FastifyInstance, payload: BackupPayload):
     insertRows(app, 'node_steps', payload.data.steps);
     insertRows(app, 'edges', payload.data.edges);
     if (payload.data.userSettings) insertRows(app, 'user_import_settings', payload.data.userSettings);
+    if (payload.data.displaySettings) insertRows(app, 'user_display_settings', payload.data.displaySettings);
   })();
   for (const file of importFiles) if (existsSync(file.file_path)) unlinkSync(file.file_path);
 }

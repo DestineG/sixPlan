@@ -80,7 +80,12 @@ const migrations = [
     version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     UNIQUE(node_id, step_key)
   );
-  CREATE INDEX node_steps_node_idx ON node_steps(node_id, sort_order);`
+  CREATE INDEX node_steps_node_idx ON node_steps(node_id, sort_order);`,
+  `CREATE TABLE user_display_settings (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    active_node_limit INTEGER NOT NULL DEFAULT 5 CHECK(active_node_limit BETWEEN 1 AND 10),
+    version INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL
+  );`
 ];
 
 export interface DatabaseContext {

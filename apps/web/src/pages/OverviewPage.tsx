@@ -4,7 +4,7 @@ import { Activity, Archive, ArrowDown, ArrowUp, Bot, CheckSquare, ChevronDown, C
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { PLAN_STATUSES, nodeStatusLabels, planStatusLabels, type ActivePlanDto, type AreaDto, type ImportPreviewDto, type PlanDto, type PlanStatus } from '@sixplan/shared';
+import { PLAN_STATUSES, nodeStatusLabels, planStatusLabels, type ActivePlanDto, type AreaDto, type DisplaySettingsDto, type ImportPreviewDto, type PlanDto, type PlanStatus } from '@sixplan/shared';
 import { api, ApiClientError, downloadFile } from '../api';
 import { ConfirmDialog, Modal } from '../components/Dialogs';
 import { AiPlanModal } from '../components/AiPlanModal';
@@ -34,6 +34,7 @@ export function OverviewPage() {
   const [batchMode, setBatchMode] = useState(false); const [selectedArchivedIds, setSelectedArchivedIds] = useState<Set<string>>(new Set());
   const [batchConfirm, setBatchConfirm] = useState(false); const [batchBusy, setBatchBusy] = useState(false);
   const areasQuery = useQuery({ queryKey: ['areas'], queryFn: () => api<{ areas: AreaDto[] }>('/api/areas') });
+  const displaySettingsQuery = useQuery({ queryKey: ['display-settings'], queryFn: () => api<{ settings: DisplaySettingsDto }>('/api/display-settings') });
   const plansQuery = useQuery({ queryKey: ['plans', selection, queryText, filterArea, filterStatus, archiveFilter, planSort], queryFn: () => {
     if (selection === 'archived') return api<{ plans: PlanDto[] }>('/api/plans/archived');
     if (selection === 'all') {
@@ -45,6 +46,7 @@ export function OverviewPage() {
   } });
   const areas = useMemo(() => areasQuery.data?.areas ?? [], [areasQuery.data]);
   const plans = useMemo(() => plansQuery.data?.plans ?? [], [plansQuery.data]);
+  const activeNodeLimit = displaySettingsQuery.data?.settings.activeNodeLimit ?? 5;
 
   useEffect(() => { setSearchText(queryText); }, [queryText]);
   useEffect(() => {
@@ -110,7 +112,7 @@ export function OverviewPage() {
   }
   function renderPlanCard(plan: PlanDto, archivedView = false) {
     const archived = Boolean(plan.archivedAt); const selecting = archivedView && batchMode;
-    return <PlanCard key={plan.id} plan={plan} showActivity={selection === 'active'} selectionMode={selecting} selected={selectedArchivedIds.has(plan.id)}
+    return <PlanCard key={plan.id} plan={plan} showActivity={selection === 'active'} activeNodeLimit={activeNodeLimit} selectionMode={selecting} selected={selectedArchivedIds.has(plan.id)}
       onToggle={() => toggleArchived(plan.id)} onOpen={() => selecting ? toggleArchived(plan.id) : navigate(`/plans/${plan.id}`)}
       onOpenNode={(nodeId) => navigate(`/plans/${plan.id}?node=${encodeURIComponent(nodeId)}`)}
       onEdit={!archived ? () => setPlanModal({ open: true, plan }) : undefined} onMove={!archived ? () => setMovePlan(plan) : undefined}
@@ -198,12 +200,12 @@ function GroupSelectionCheckbox({ label, checked, indeterminate, onChange }: { l
   return <input ref={input} className="group-selection-check" type="checkbox" aria-label={label} checked={checked} onChange={(event) => onChange(event.target.checked)} />;
 }
 
-function PlanCard({ plan, showActivity = false, selectionMode = false, selected = false, onToggle, onOpen, onOpenNode, onEdit, onMove, onExport, onArchive, onRestore, onDelete }: {
-  plan: PlanWithActivity; showActivity?: boolean; selectionMode?: boolean; selected?: boolean; onToggle?: () => void; onOpen: () => void; onOpenNode: (nodeId: string) => void; onEdit?: () => void;
+function PlanCard({ plan, showActivity = false, activeNodeLimit = 5, selectionMode = false, selected = false, onToggle, onOpen, onOpenNode, onEdit, onMove, onExport, onArchive, onRestore, onDelete }: {
+  plan: PlanWithActivity; showActivity?: boolean; activeNodeLimit?: number; selectionMode?: boolean; selected?: boolean; onToggle?: () => void; onOpen: () => void; onOpenNode: (nodeId: string) => void; onEdit?: () => void;
   onMove?: () => void; onExport: () => void; onArchive?: () => void; onRestore?: () => void; onDelete?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false); const activeNodes = plan.activeNodes ?? [];
-  const visibleNodes = expanded ? activeNodes : activeNodes.slice(0, 3);
+  const visibleNodes = expanded ? activeNodes : activeNodes.slice(0, activeNodeLimit);
   return <article className={`plan-card ${plan.archivedAt ? 'archived' : ''} ${selected ? 'batch-selected' : ''}`} onDoubleClick={selectionMode ? undefined : onOpen}>
     <div className="plan-card-top"><div className="plan-card-badges"><span className={`status-pill status-${plan.status}`}>{planStatusLabels[plan.status]}</span>{plan.archivedAt && <span className="archived-card-badge">已归档</span>}</div>
     {selectionMode ? <input className="batch-card-check" type="checkbox" aria-label={`选择计划 ${plan.name}`} checked={selected} onChange={onToggle} /> : <DropdownMenu.Root><DropdownMenu.Trigger className="icon-button" aria-label="计划操作"><MoreHorizontal size={18} /></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="menu-content" align="end">
@@ -217,7 +219,7 @@ function PlanCard({ plan, showActivity = false, selectionMode = false, selected 
         <div><strong>{node.title}</strong>{node.stepCount > 0 && <span>{node.completedStepCount}/{node.stepCount}</span>}</div>
         {node.activeSteps.length > 0 ? node.activeSteps.slice(0, 2).map((step) => <small key={step.id}><span className={`node-status node-status-${step.status}`}>{nodeStatusLabels[step.status]}</span>{step.title}{step.startDate || step.endDate ? ` · ${step.startDate ?? '未定'} 至 ${step.endDate ?? '未定'}` : ''}</small>) : <small>{node.summary || '节点正在进行中'}</small>}
       </button>)}</div>}
-      {activeNodes.length > 3 && <button className="activity-expand" onClick={() => setExpanded((value) => !value)}>{expanded ? <><ChevronUp size={14} />收起</> : <><ChevronDown size={14} />还有 {activeNodes.length - 3} 个</>}</button>}
+      {activeNodes.length > activeNodeLimit && <button className="activity-expand" onClick={() => setExpanded((value) => !value)}>{expanded ? <><ChevronUp size={14} />收起</> : <><ChevronDown size={14} />还有 {activeNodes.length - activeNodeLimit} 个</>}</button>}
     </div>}
     <div className="plan-card-meta"><span>{plan.areaName}</span><span>{plan.nodeCount} 个节点</span><time>{new Date(plan.archivedAt ?? plan.updatedAt).toLocaleDateString('zh-CN')}</time></div></article>;
 }
