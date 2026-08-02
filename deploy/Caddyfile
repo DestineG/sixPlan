@@ -1,5 +1,6 @@
 {
 	email {$ACME_EMAIL}
+	default_sni {$SIXPLAN_HTTPS_HOST}
 }
 
 https://{$SIXPLAN_HTTPS_HOST} {
