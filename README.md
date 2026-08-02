@@ -53,11 +53,12 @@ docker compose up -d --build
 启用本地 HTTPS 网关，同时保留局域网 HTTP：
 
 ```bash
-cp .env.example .env
+cp -n .env.example .env
+nano .env
 docker compose -f compose.yaml -f compose.https.yaml up -d --build
 ```
 
-HTTPS 模式只在本机增加 Caddy，不包含任何公网转发工具。需要公网访问时，由项目外部的端口转发、隧道或反向代理将公网 `80/443` 转到本机 Caddy。完整配置、证书和安全说明见 [deploy/README.md](deploy/README.md)。
+启动前必须把 `.env` 中的 `SIXPLAN_HTTPS_HOST` 改为浏览器最终访问的公网 IPv4，并填写 `ACME_EMAIL`。HTTPS 模式只在本地服务器增加 Caddy，不包含任何公网转发工具；云服务器只需把公网 TCP `80/443` 透明转发到本地服务器的 TCP `80/443`。按设备划分的完整步骤、验证方法和故障排查见 [Docker 部署指南](deploy/README.md)。
 
 ## 管理员命令
 
